@@ -418,6 +418,10 @@ cfg_if! {
         #[link(name = "root")]
         #[link(name = "network")]
         extern {}
+    } else if #[cfg(target_os = "blueos")] {
+        // Not link to system's libc and libm, we're currently providing
+        // BlueOS libc in another crate.
+        extern {}
     } else if #[cfg(target_env = "newlib")] {
         #[link(name = "c")]
         #[link(name = "m")]
