@@ -4,11 +4,13 @@ macro_rules! expand_align {
             pub struct pthread_mutex_t { // Unverified
                 #[cfg(any(target_arch = "mips",
                           target_arch = "arm",
-                          target_arch = "powerpc"))]
+                          target_arch = "powerpc",
+                          target_arch = "riscv32",))]
                 __align: [::c_long; 0],
                 #[cfg(not(any(target_arch = "mips",
                               target_arch = "arm",
-                              target_arch = "powerpc")))]
+                              target_arch = "powerpc",
+                              target_arch = "riscv32",)))]
                 __align: [::c_longlong; 0],
                 size: [u8; ::__SIZEOF_PTHREAD_MUTEX_T],
             }
@@ -16,11 +18,13 @@ macro_rules! expand_align {
             pub struct pthread_rwlock_t { // Unverified
                 #[cfg(any(target_arch = "mips",
                           target_arch = "arm",
-                          target_arch = "powerpc"))]
+                          target_arch = "powerpc",
+                          target_arch = "riscv32",))]
                 __align: [::c_long; 0],
                 #[cfg(not(any(target_arch = "mips",
                               target_arch = "arm",
-                              target_arch = "powerpc")))]
+                              target_arch = "powerpc",
+                              target_arch = "riscv32",)))]
                 __align: [::c_longlong; 0],
                 size: [u8; ::__SIZEOF_PTHREAD_RWLOCK_T],
             }
