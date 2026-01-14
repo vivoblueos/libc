@@ -182,11 +182,16 @@ s! {
         pub f_flag: ::c_ulong,
         pub f_namemax: ::c_ulong,
     }
-
+    //keep blueos has signal process ability same as other os
     pub struct sigaction {
+        #[cfg(not(target_os = "blueos"))]
         pub sa_handler: extern fn(arg1: ::c_int),
+        #[cfg(target_os = "blueos")]
+        pub sa_sigaction: sighandler_t,
         pub sa_mask: sigset_t,
         pub sa_flags: ::c_int,
+        #[cfg(target_os = "blueos")]
+        pub sa_restorer: Option<extern "C" fn()>,
     }
 
     pub struct stack_t {
