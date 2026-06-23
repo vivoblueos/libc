@@ -9,6 +9,14 @@ pub type c_ulong = u32;
 pub type sigset_t = ::c_ulong;
 pub type timer_t = ::c_int;
 
+// Fixed-width types for wireless extensions
+pub type __u8 = ::c_uchar;
+pub type __u16 = ::c_ushort;
+pub type __s16 = ::c_short;
+pub type __u32 = ::c_uint;
+pub type __s32 = ::c_int;
+pub const IFNAMSIZ: usize = 16;
+
 s! {
     pub struct timespec {
         pub tv_sec: ::time_t,
@@ -198,6 +206,91 @@ s! {
         pub __librs_internal_align: [::c_int; 0],
     }
 }
+// ---- Wireless extensions (linux/wireless.h) ----
+
+s! {
+    pub struct iw_param {
+        pub value: __s32,
+        pub fixed: __u8,
+        pub disabled: __u8,
+        pub flags: __u16,
+    }
+
+    pub struct iw_point {
+        pub pointer: *mut ::c_void,
+        pub length: __u16,
+        pub flags: __u16,
+    }
+
+    pub struct iw_freq {
+        pub m: __s32,
+        pub e: __s16,
+        pub i: __u8,
+        pub flags: __u8,
+    }
+
+    pub struct iw_quality {
+        pub qual: __u8,
+        pub level: __u8,
+        pub noise: __u8,
+        pub updated: __u8,
+    }
+
+    pub struct iwreq {
+        pub ifr_ifrn: __c_anonymous_iwreq,
+        pub u: iwreq_data,
+    }
+
+    pub struct iw_scan_req {
+        pub scan_type: __u8,
+        pub essid_len: __u8,
+        pub num_channels: __u8,
+        pub flags: __u8,
+        pub bssid: sockaddr,
+        pub essid: [__u8; IW_ESSID_MAX_SIZE],
+        pub min_channel_time: __u32,
+        pub max_channel_time: __u32,
+        pub channel_list: [iw_freq; IW_MAX_FREQUENCIES],
+    }
+}
+
+// Unions — defined at module level (BlueOS uses Rust nightly, no cfg(libc_union) needed).
+// Manual Copy/Clone impls to match what s! / s_no_extra_traits! would provide.
+pub union iwreq_data {
+    pub name: [::c_char; IFNAMSIZ],
+    pub essid: iw_point,
+    pub nwid: iw_param,
+    pub freq: iw_freq,
+    pub sens: iw_param,
+    pub bitrate: iw_param,
+    pub txpower: iw_param,
+    pub rts: iw_param,
+    pub frag: iw_param,
+    pub mode: __u32,
+    pub retry: iw_param,
+    pub encoding: iw_point,
+    pub power: iw_param,
+    pub qual: iw_quality,
+    pub ap_addr: sockaddr,
+    pub addr: sockaddr,
+    pub param: iw_param,
+    pub data: iw_point,
+}
+
+pub union __c_anonymous_iwreq {
+    pub ifrn_name: [::c_char; IFNAMSIZ],
+}
+
+impl ::Copy for iwreq_data {}
+impl ::Clone for iwreq_data {
+    fn clone(&self) -> iwreq_data { *self }
+}
+
+impl ::Copy for __c_anonymous_iwreq {}
+impl ::Clone for __c_anonymous_iwreq {
+    fn clone(&self) -> __c_anonymous_iwreq { *self }
+}
+
 // For ioctl libcall.
 pub const FBIOGET_VSCREENINFO: ::c_ulong = 0x4600;
 pub const FBIOPUT_VSCREENINFO: ::c_ulong = 0x4601;
@@ -339,6 +432,47 @@ pub const SO_PROTOCOL: ::c_int = 0x1016;
 pub const SO_DOMAIN: ::c_int = 0x1019;
 
 pub const FIONBIO: ::c_ulong = 1;
+
+// ---- Wireless ioctl constants (linux/wireless.h) ----
+pub const SIOCSIWCOMMIT: ::c_ulong = 0x8B00;
+pub const SIOCGIWNAME: ::c_ulong = 0x8B01;
+pub const SIOCSIWNWID: ::c_ulong = 0x8B02;
+pub const SIOCGIWNWID: ::c_ulong = 0x8B03;
+pub const SIOCSIWFREQ: ::c_ulong = 0x8B04;
+pub const SIOCGIWFREQ: ::c_ulong = 0x8B05;
+pub const SIOCSIWMODE: ::c_ulong = 0x8B06;
+pub const SIOCGIWMODE: ::c_ulong = 0x8B07;
+pub const SIOCSIWSENS: ::c_ulong = 0x8B08;
+pub const SIOCGIWSENS: ::c_ulong = 0x8B09;
+pub const SIOCSIWAP: ::c_ulong = 0x8B14;
+pub const SIOCGIWAP: ::c_ulong = 0x8B15;
+pub const SIOCSIWMLME: ::c_ulong = 0x8B16;
+pub const SIOCGIWMLME: ::c_ulong = 0x8B17;
+pub const SIOCSIWSCAN: ::c_ulong = 0x8B18;
+pub const SIOCGIWSCAN: ::c_ulong = 0x8B19;
+pub const SIOCSIWESSID: ::c_ulong = 0x8B1A;
+pub const SIOCGIWESSID: ::c_ulong = 0x8B1B;
+pub const SIOCSIWENCODE: ::c_ulong = 0x8B2A;
+pub const SIOCGIWENCODE: ::c_ulong = 0x8B2B;
+pub const SIOCSIWAUTH: ::c_ulong = 0x8B32;
+pub const SIOCGIWAUTH: ::c_ulong = 0x8B33;
+
+// Wireless scan flags
+pub const IW_SCAN_DEFAULT: ::c_uint = 0x0000;
+pub const IW_SCAN_ALL_ESSID: ::c_uint = 0x0001;
+pub const IW_SCAN_THIS_ESSID: ::c_uint = 0x0002;
+pub const IW_SCAN_ALL_FREQ: ::c_uint = 0x0004;
+pub const IW_SCAN_THIS_FREQ: ::c_uint = 0x0008;
+pub const IW_SCAN_ALL_MODE: ::c_uint = 0x0010;
+pub const IW_SCAN_THIS_MODE: ::c_uint = 0x0020;
+pub const IW_SCAN_ALL_RATE: ::c_uint = 0x0040;
+pub const IW_SCAN_THIS_RATE: ::c_uint = 0x0080;
+pub const IW_SCAN_TYPE_ACTIVE: ::c_int = 0;
+pub const IW_SCAN_TYPE_PASSIVE: ::c_int = 1;
+pub const IW_SCAN_MAX_DATA: usize = 4096;
+
+pub const IW_ESSID_MAX_SIZE: usize = 32;
+pub const IW_MAX_FREQUENCIES: usize = 32;
 
 /// https://pubs.opengroup.org/onlinepubs/9799919799/basedefs/poll.h.html
 pub const POLLIN: ::c_short = 0x0001;
