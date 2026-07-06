@@ -283,12 +283,16 @@ pub union __c_anonymous_iwreq {
 
 impl ::Copy for iwreq_data {}
 impl ::Clone for iwreq_data {
-    fn clone(&self) -> iwreq_data { *self }
+    fn clone(&self) -> iwreq_data {
+        *self
+    }
 }
 
 impl ::Copy for __c_anonymous_iwreq {}
 impl ::Clone for __c_anonymous_iwreq {
-    fn clone(&self) -> __c_anonymous_iwreq { *self }
+    fn clone(&self) -> __c_anonymous_iwreq {
+        *self
+    }
 }
 
 // For ioctl libcall.
