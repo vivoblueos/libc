@@ -128,6 +128,63 @@ s! {
         pub f_spare: [::c_ulong; 4],
     }
 
+    pub struct fb_bitfield {
+        pub offset: u32,
+        pub length: u32,
+        pub msb_right: u32,
+    }
+
+    pub struct fb_fix_screeninfo {
+        pub id: [::c_char; 16],
+        pub smem_start: ::c_ulong,
+        pub smem_len: u32,
+        pub type_: u32,
+        pub type_aux: u32,
+        pub visual: u32,
+        pub xpanstep: u16,
+        pub ypanstep: u16,
+        pub ywrapstep: u16,
+        pub line_length: u32,
+        pub mmio_start: ::c_ulong,
+        pub mmio_len: u32,
+        pub accel: u32,
+        pub capabilities: u16,
+        pub reserved: [u16; 2],
+        __reserved: [u8; 12],
+    }
+
+    pub struct fb_var_screeninfo {
+        pub xres: u32,
+        pub yres: u32,
+        pub xres_virtual: u32,
+        pub yres_virtual: u32,
+        pub xoffset: u32,
+        pub yoffset: u32,
+        pub bits_per_pixel: u32,
+        pub grayscale: u32,
+        pub red: ::fb_bitfield,
+        pub green: ::fb_bitfield,
+        pub blue: ::fb_bitfield,
+        pub transp: ::fb_bitfield,
+        pub nonstd: u32,
+        pub activate: u32,
+        pub height: u32,
+        pub width: u32,
+        pub accel_flags: u32,
+        pub pixclock: u32,
+        pub left_margin: u32,
+        pub right_margin: u32,
+        pub upper_margin: u32,
+        pub lower_margin: u32,
+        pub hsync_len: u32,
+        pub vsync_len: u32,
+        pub sync: u32,
+        pub vmode: u32,
+        pub rotate: u32,
+        pub colorspace: u32,
+        pub reserved: [u32; 4],
+    }
+
     pub struct pthread_barrier_t {
         #[cfg(target_pointer_width = "32")]
         pub __librs_internal_size: [::c_uchar; 24],
@@ -142,6 +199,9 @@ s! {
     }
 }
 // For ioctl libcall.
+pub const FBIOGET_VSCREENINFO: ::c_ulong = 0x4600;
+pub const FBIOPUT_VSCREENINFO: ::c_ulong = 0x4601;
+pub const FBIOGET_FSCREENINFO: ::c_ulong = 0x4602;
 pub const TCGETS: ::c_ulong = 0x5401;
 pub const TCSETS: ::c_ulong = 0x5402;
 pub const TCSETSW: ::c_ulong = 0x5403;
@@ -353,6 +413,13 @@ pub const PTHREAD_PRIO_NONE: ::c_int = 0;
 pub const PTHREAD_PROCESS_PRIVATE: ::c_int = 0;
 
 pub const IP_HDRINCL: ::c_int = 2;
+
+const _: [(); 0x4600] = [(); FBIOGET_VSCREENINFO as usize];
+const _: [(); 0x4601] = [(); FBIOPUT_VSCREENINFO as usize];
+const _: [(); 0x4602] = [(); FBIOGET_FSCREENINFO as usize];
+const _: [(); 12] = [(); ::mem::size_of::<::fb_bitfield>()];
+const _: [(); 80] = [(); ::mem::size_of::<::fb_fix_screeninfo>()];
+const _: [(); 160] = [(); ::mem::size_of::<::fb_var_screeninfo>()];
 
 extern "C" {
     pub fn futimens(fd: ::c_int, times: *const ::timespec) -> ::c_int;
