@@ -1,8 +1,6 @@
 //! Compare libc's KERNEL_VERSION macro against a specific kernel version.
 
-#[cfg(
-    target_os = "linux",
-)]
+#[cfg(target_os = "linux")]
 mod t {
     use libc;
 
