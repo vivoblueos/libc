@@ -1,0 +1,7 @@
+org = "vivoblueos-lab"
+upstream-repo = "vivoblueos-lab/blueos"
+upstream-branch = "main"
+
+repo = "libc"
+path = "libc"
+filter-version = 2

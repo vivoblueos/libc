@@ -1,0 +1,34 @@
+name: Sync BlueOS
+
+on:
+  # 定时触发
+  schedule:
+    - cron: "29 2 * * 1,4"
+  # 允许网页界面手动触发
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+# 并发控制
+concurrency:
+  group: blueos-pull
+  cancel-in-progress: false
+
+jobs:
+  pull:
+    uses: vivoblueos-lab/josh-sync/.github/workflows/blueos-pull.yml@88ae50df70f35653e30c997b433c0409a5824315
+    with:
+      # 这里的 APP_CLIENT_ID 和 APP_PRIVATE_KEY 是从仓库变量和秘密中获取的
+      github-app-id: ${{ vars.APP_CLIENT_ID }}
+      # xxx[bot] 这里的 xxx, 就是 GitHub App 的名称
+      pr-author: "blueos-josh-sync[bot]"
+      josh-sync-repository: vivoblueos-lab/josh-sync
+      # 就是上文的 REV
+      josh-sync-revision: 88ae50df70f35653e30c997b433c0409a5824315
+      branch-name: blueos-pull
+      # 这里填的是当前子仓库的默认分支, libc的比较特殊
+      pr-base-branch: blueos-dev
+    secrets:
+      github-app-secret: ${{ secrets.APP_PRIVATE_KEY }}
