@@ -1,30 +1,50 @@
-#!/usr/bin/env sh
+#!/bin/sh
 #
 # Install musl and musl-sanitized linux kernel headers
 # to musl-{$1} directory
 
-set -ex
+set -eux
 
-MUSL_VERSION=1.1.24
-MUSL="musl-${MUSL_VERSION}"
+arch="$1"
+version="$2"
+old_musl=1.1.24
+new_musl=1.2.5
 
-# Download, configure, build, and install musl:
-curl --retry 5 https://www.musl-libc.org/releases/${MUSL}.tar.gz | tar xzf -
+case "$arch" in
+    loongarch64) musl_version="$new_musl" ;;
+    *)
+        case "$version" in
+            old) musl_version="$old_musl" ;;
+            new) musl_version="$new_musl" ;;
+            *)
+                echo "musl version must be set to either 'old' or 'new'"
+                exit 1
+                ;;
+        esac
+        ;;
+esac
 
-cd $MUSL
+musl="musl-${musl_version}"
+
+# Note that if a new version of musl is needed, it needs to be added to the mirror
+# first. See https://github.com/rust-lang/ci-mirrors/blob/main/files/libc.toml.
+curl --retry 5 "https://ci-mirrors.rust-lang.org/libc/${musl}.tar.gz" | tar xzf -
+
+# Configure, build, and install musl:
+cd "$musl"
 case ${1} in
     aarch64)
         musl_arch=aarch64
         kernel_arch=arm64
         CC=aarch64-linux-gnu-gcc \
-          ./configure --prefix="/musl-${musl_arch}" --enable-wrapper=yes
+            ./configure --prefix="/musl-${musl_arch}" --enable-wrapper=yes
         make install -j4
         ;;
     arm)
         musl_arch=arm
         kernel_arch=arm
         CC=arm-linux-gnueabihf-gcc CFLAGS="-march=armv6 -marm -mfpu=vfp" \
-          ./configure --prefix="/musl-${musl_arch}" --enable-wrapper=yes
+            ./configure --prefix="/musl-${musl_arch}" --enable-wrapper=yes
         make install -j4
         ;;
     i686)
@@ -35,7 +55,7 @@ case ${1} in
         # Specifically pass -m32 in CFLAGS and override CC when running
         # ./configure, since otherwise the script will fail to find a compiler.
         CC=gcc CFLAGS="-m32" \
-          ./configure --prefix="/musl-${musl_arch}" --disable-shared --target=i686
+            ./configure --prefix="/musl-${musl_arch}" --disable-shared --target=i686
         # unset CROSS_COMPILE when running make; otherwise the makefile will
         # call the non-existent binary 'i686-ar'.
         make CROSS_COMPILE= install -j4
@@ -50,7 +70,21 @@ case ${1} in
         musl_arch=s390x
         kernel_arch=s390
         CC=s390x-linux-gnu-gcc \
-          ./configure --prefix="/musl-${musl_arch}" --enable-wrapper=yes
+            ./configure --prefix="/musl-${musl_arch}" --enable-wrapper=yes
+        make install -j4
+        ;;
+    loongarch64)
+        musl_arch=loongarch64
+        kernel_arch=loongarch
+        CC=loongarch64-linux-gnu-gcc-14 \
+            ./configure --prefix="/musl-${musl_arch}" --enable-wrapper=yes
+        make install -j4
+        ;;
+    powerpc64*)
+        musl_arch=powerpc64
+        kernel_arch=powerpc
+        CC="${1}-linux-gnu-gcc" CFLAGS="-mlong-double-64" \
+            ./configure --prefix="/musl-${musl_arch}" --enable-wrapper=yes
         make install -j4
         ;;
     *)
@@ -59,18 +93,71 @@ case ${1} in
         ;;
 esac
 
-
 # shellcheck disable=SC2103
 cd ..
-rm -rf $MUSL
+rm -rf "$musl"
 
-# Download, configure, build, and install musl-sanitized kernel headers:
-KERNEL_HEADER_VER="4.19.88"
-curl --retry 5 -L \
-     "https://github.com/sabotage-linux/kernel-headers/archive/v${KERNEL_HEADER_VER}.tar.gz" | \
-    tar xzf -
+# Download, configure, build, and install musl-sanitized kernel headers.
+
+# Alpine follows stable kernel releases, 3.20 uses Linux 6.6 headers.
+alpine_version=3.20
+alpine_git=https://git.alpinelinux.org/aports
+
+# This routine piggybacks on: https://git.alpinelinux.org/aports/tree/main/linux-headers?h=3.20-stable
+git clone -n --depth=1 --filter=tree:0 -b "${alpine_version}-stable" "$alpine_git"
 (
-    cd kernel-headers-${KERNEL_HEADER_VER}
-    make ARCH="${kernel_arch}" prefix="/musl-${musl_arch}" install -j4
+    cd aports
+    git sparse-checkout set --no-cone main/linux-headers
+    git checkout
+
+    cd main/linux-headers
+    cp APKBUILD APKBUILD.vars
+    cat <<- EOF >> APKBUILD.vars
+        echo "\$source" > alpine-source
+        echo "\$_kernver" > alpine-kernver
+        echo "\$pkgver" > alpine-pkgver
+        echo "\$sha512sums" > alpine-sha512sums
+EOF
+
+    # Use a mirror since kernel.org can be a bit inconsistent
+    sed -i 's|https://kernel.org/pub/linux/kernel|https://ci-mirrors.rust-lang.org/linux/kernel|g' \
+        APKBUILD.vars
+
+    cat APKBUILD.vars
+
+    # Retrieve all the variables
+    sh APKBUILD.vars
+
+    kernel_version=$(tr -d "[:space:]" < alpine-kernver)
+    pkg_version=$(tr -d "[:space:]" < alpine-pkgver)
+
+    urls=$(grep -o 'https.*' alpine-source)
+    kernel=""
+    patch=""
+    for url in $urls; do
+        base=$(basename "$url")
+        curl --retry 5 -L "$url" > "$base"
+        case $base in
+            linux-*) kernel=$base ;;
+            patch-*) patch=$base ;;
+        esac
+        # Check if file is known
+        grep -o "$base" alpine-sha512sums
+    done
+
+    # Double check checksums
+    sha512sum -c alpine-sha512sums
+
+    # Extract, apply patches, compile and install headers
+    tar -xf "$kernel"
+    cd "linux-$kernel_version"
+    if [ "$pkg_version" != "$kernel_version" ]; then
+        unxz -c < "../$patch" | patch -p1
+    fi
+    for p in ../*.patch; do
+        patch -p1 < "$p"
+    done
+    make headers_install ARCH="${kernel_arch}" INSTALL_HDR_PATH="/musl-${musl_arch}"
 )
-rm -rf kernel-headers-${KERNEL_HEADER_VER}
+
+rm -rf aports

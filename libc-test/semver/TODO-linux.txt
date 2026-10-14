@@ -1,4 +1,4 @@
-# The following symbols are not not available in some combinations of
+# The following symbols are not available in some combinations of
 # musl/gnu/android and/or architecture.
 KEYCTL_CAPABILITIES
 KEYCTL_CAPS0_BIG_KEY
@@ -54,7 +54,6 @@ SO_SELECT_ERR_QUEUE
 SO_SNDTIMEO_NEW
 SO_STYLE
 SO_TIMESTAMPING_NEW
-SO_TIMESTAMPNS
 SO_TIMESTAMPNS_NEW
 SO_TIMESTAMP_NEW
 SO_TXTIME

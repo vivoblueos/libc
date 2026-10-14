@@ -1,7 +1,9 @@
-FROM ubuntu:23.10
-RUN apt-get update
-RUN apt-get install -y --no-install-recommends \
-  gcc libc6-dev ca-certificates linux-headers-generic
+FROM ubuntu:25.04
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    gcc \
+    libc6-dev
 
 RUN apt search linux-headers
 RUN ls /usr/src

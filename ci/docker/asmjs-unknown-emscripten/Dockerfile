@@ -1,12 +1,11 @@
-FROM ubuntu:23.10
+FROM ubuntu:25.04
 
 # This is a workaround to avoid the interaction with tzdata.
 ENV DEBIAN_FRONTEND=noninteractive
 ENV TZ=America/New_York
 
-RUN apt-get update
-RUN apt-get install -y --no-install-recommends tzdata
-RUN apt-get install -y --no-install-recommends \
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    bzip2 \
     ca-certificates \
     curl \
     gcc \
@@ -14,12 +13,11 @@ RUN apt-get install -y --no-install-recommends \
     libc6-dev \
     libxml2 \
     python3 \
-    python3-distutils \
-    xz-utils \
-    bzip2
+    tzdata \
+    xz-utils
 
 COPY emscripten.sh /
-RUN bash /emscripten.sh
+RUN /emscripten.sh
 
 ENV PATH=$PATH:/rust/bin \
     CARGO_TARGET_ASMJS_UNKNOWN_EMSCRIPTEN_RUNNER=node

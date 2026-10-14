@@ -1,14 +1,17 @@
-FROM ubuntu:23.10
+FROM ubuntu:25.04
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        curl ca-certificates \
-        gcc libc6-dev \
-        gcc-s390x-linux-gnu libc6-dev-s390x-cross \
-        qemu-system-s390x \
-        cpio
+    ca-certificates \
+    cpio \
+    curl \
+    gcc \
+    gcc-s390x-linux-gnu \
+    libc6-dev \
+    libc6-dev-s390x-cross \
+    qemu-system-s390x
 
 COPY linux-s390x.sh /
-RUN bash /linux-s390x.sh
+RUN /linux-s390x.sh
 
 COPY test-runner-linux /
 

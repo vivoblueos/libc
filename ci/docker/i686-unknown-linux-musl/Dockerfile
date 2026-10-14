@@ -1,13 +1,22 @@
-FROM ubuntu:23.10
+FROM ubuntu:25.04
 
-RUN dpkg --add-architecture i386
-RUN apt-get update
-RUN apt-get install -y --no-install-recommends \
-  gcc-multilib make libc6-dev git curl ca-certificates libc6-i386
+RUN dpkg --add-architecture i386 && \
+    apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        curl \
+        gcc-multilib \
+        git \
+        libc6-dev \
+        libc6-i386 \
+        make \
+        patch \
+        rsync \
+        xz-utils
 
+ARG MUSL_VERSION
 COPY install-musl.sh /
-RUN sh /install-musl.sh i686
+RUN /install-musl.sh i686 "$MUSL_VERSION"
 
 ENV PATH=$PATH:/musl-i686/bin:/rust/bin \
     CC_i686_unknown_linux_musl=musl-gcc \
-    RUSTFLAGS="-L /musl-i686/lib"
+    EXTRA_RUSTFLAGS="-L /musl-i686/lib"

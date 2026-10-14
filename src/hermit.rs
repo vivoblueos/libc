@@ -1,30 +1,11 @@
 //! Hermit C type definitions
 
-cfg_if! {
-    if #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))] {
-        pub type c_char = u8;
-    } else {
-        pub type c_char = i8;
-    }
-}
+use crate::prelude::*;
 
-pub type c_schar = i8;
-pub type c_uchar = u8;
-pub type c_short = i16;
-pub type c_ushort = u16;
-pub type c_int = i32;
-pub type c_uint = u32;
-pub type c_long = i64;
-pub type c_ulong = u64;
-pub type c_longlong = i64;
-pub type c_ulonglong = u64;
 pub type intmax_t = i64;
 pub type uintmax_t = u64;
 pub type intptr_t = isize;
 pub type uintptr_t = usize;
-
-pub type c_float = f32;
-pub type c_double = f64;
 
 pub type size_t = usize;
 pub type ssize_t = isize;
@@ -106,9 +87,9 @@ s! {
     pub struct sockaddr_storage {
         pub ss_len: u8,
         pub ss_family: sa_family_t,
-        __ss_pad1: [u8; 6],
+        __ss_pad1: Padding<[u8; 6]>,
         __ss_align: i64,
-        __ss_pad2: [u8; 112],
+        __ss_pad2: Padding<[u8; 112]>,
     }
 
     pub struct stat {
@@ -119,7 +100,7 @@ s! {
         pub st_uid: u32,
         pub st_gid: u32,
         pub st_rdev: u64,
-        pub st_size: u64,
+        pub st_size: i64,
         pub st_blksize: i64,
         pub st_blocks: i64,
         pub st_atim: timespec,
@@ -127,14 +108,17 @@ s! {
         pub st_ctim: timespec,
     }
 
+    #[derive(Default)]
     pub struct timespec {
         pub tv_sec: time_t,
         pub tv_nsec: i32,
     }
 }
 
-pub const AF_INET: i32 = 0;
+pub const AF_UNSPEC: i32 = 0;
+pub const AF_INET: i32 = 3;
 pub const AF_INET6: i32 = 1;
+pub const AF_VSOCK: i32 = 2;
 
 pub const CLOCK_REALTIME: clockid_t = 1;
 pub const CLOCK_MONOTONIC: clockid_t = 4;
@@ -576,5 +560,3 @@ extern "C" {
     #[link_name = "sys_poll"]
     pub fn poll(fds: *mut pollfd, nfds: nfds_t, timeout: i32) -> i32;
 }
-
-pub use ffi::c_void;
