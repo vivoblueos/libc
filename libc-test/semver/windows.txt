@@ -150,6 +150,7 @@ accept
 access
 aligned_free
 aligned_malloc
+aligned_realloc
 atexit
 atof
 atoi
@@ -173,12 +174,15 @@ c_void
 calloc
 chdir
 chmod
+clock
 clock_t
 close
 commit
 connect
 creat
+ctime
 dev_t
+difftime
 dup
 dup2
 errno_t
@@ -213,7 +217,11 @@ fsetpos
 fstat
 ftell
 fwrite
+get_daylight
+get_dstbias
 get_osfhandle
+get_timezone
+get_tzname
 getchar
 getcwd
 getenv
@@ -267,6 +275,8 @@ putchar
 putenv
 putenv_s
 puts
+qsort
+qsort_s
 raise
 rand
 read
@@ -325,6 +335,7 @@ tm
 tmpfile
 tolower
 toupper
+tzset
 uint16_t
 uint32_t
 uint64_t
@@ -337,6 +348,7 @@ utimbuf
 wchar_t
 wchmod
 wcslen
+wcsnlen
 wcstombs
 wexecl
 wexecle

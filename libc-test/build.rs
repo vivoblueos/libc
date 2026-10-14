@@ -1,16 +1,26 @@
 #![deny(warnings)]
-
-extern crate ctest2 as ctest;
+#![allow(clippy::match_like_matches_macro)]
 
 use std::fs::File;
-use std::io::{BufRead, BufReader, BufWriter, Write};
-use std::path::{Path, PathBuf};
-use std::{env, io};
+use std::io::{
+    BufRead,
+    BufReader,
+    BufWriter,
+    Write,
+};
+use std::path::{
+    Path,
+    PathBuf,
+};
+use std::{
+    env,
+    io,
+};
 
 fn do_cc() {
     let target = env::var("TARGET").unwrap();
-    if cfg!(unix) {
-        let exclude = ["redox", "wasi"];
+    if cfg!(unix) || target.contains("cygwin") {
+        let exclude = ["redox", "wasi", "wali"];
         if !exclude.iter().any(|x| target.contains(x)) {
             let mut cmsg = cc::Build::new();
 
@@ -22,22 +32,25 @@ fn do_cc() {
             cmsg.compile("cmsg");
         }
 
-        if target.contains("linux")
+        if (target.contains("linux") && !target.contains("wasm32"))
             || target.contains("android")
             || target.contains("emscripten")
             || target.contains("fuchsia")
             || target.contains("bsd")
+            || target.contains("cygwin")
         {
             cc::Build::new().file("src/makedev.c").compile("makedev");
         }
     }
-    if target.contains("android") || target.contains("linux") {
+    if target.contains("android") || (target.contains("linux") && !target.contains("wasm32")) {
         cc::Build::new().file("src/errqueue.c").compile("errqueue");
     }
-    if target.contains("linux")
+    if (target.contains("linux") && !target.contains("wasm32"))
         || target.contains("l4re")
         || target.contains("android")
         || target.contains("emscripten")
+        || target.contains("solaris")
+        || target.contains("illumos")
     {
         cc::Build::new().file("src/sigrt.c").compile("sigrt");
     }
@@ -45,40 +58,42 @@ fn do_cc() {
 
 fn do_ctest() {
     match &env::var("TARGET").unwrap() {
-        t if t.contains("android") => return test_android(t),
-        t if t.contains("apple") => return test_apple(t),
-        t if t.contains("dragonfly") => return test_dragonflybsd(t),
-        t if t.contains("emscripten") => return test_emscripten(t),
-        t if t.contains("freebsd") => return test_freebsd(t),
-        t if t.contains("haiku") => return test_haiku(t),
-        t if t.contains("linux") => return test_linux(t),
-        t if t.contains("netbsd") => return test_netbsd(t),
-        t if t.contains("openbsd") => return test_openbsd(t),
-        t if t.contains("redox") => return test_redox(t),
-        t if t.contains("solaris") => return test_solarish(t),
-        t if t.contains("illumos") => return test_solarish(t),
-        t if t.contains("wasi") => return test_wasi(t),
-        t if t.contains("windows") => return test_windows(t),
-        t if t.contains("vxworks") => return test_vxworks(t),
-        t if t.contains("nto-qnx") => return test_neutrino(t),
-        t => panic!("unknown target {}", t),
+        t if t.contains("android") => test_android(t),
+        t if t.contains("apple") => test_apple(t),
+        t if t.contains("dragonfly") => test_dragonflybsd(t),
+        t if t.contains("emscripten") => test_emscripten(t),
+        t if t.contains("freebsd") => test_freebsd(t),
+        t if t.contains("haiku") => test_haiku(t),
+        t if t.contains("l4re") => test_linux(t),
+        t if t.contains("linux") => test_linux(t),
+        t if t.contains("netbsd") => test_netbsd(t),
+        t if t.contains("openbsd") => test_openbsd(t),
+        t if t.contains("cygwin") => test_cygwin(t),
+        t if t.contains("redox") => test_redox(t),
+        t if t.contains("solaris") => test_solarish(t),
+        t if t.contains("illumos") => test_solarish(t),
+        t if t.contains("wasi") => test_wasi(t),
+        t if t.contains("windows") => test_windows(t),
+        t if t.contains("vxworks") => test_vxworks(t),
+        t if t.contains("nto-qnx") => test_neutrino(t),
+        t if t.contains("aix") => return test_aix(t),
+        t => panic!("unknown target {t}"),
     }
 }
 
 fn ctest_cfg() -> ctest::TestGenerator {
     let mut cfg = ctest::TestGenerator::new();
-    let libc_cfgs = [
-        "libc_priv_mod_use",
-        "libc_union",
-        "libc_const_size_of",
-        "libc_align",
-        "libc_core_cvoid",
-        "libc_packedN",
-        "libc_thread_local",
-    ];
-    for f in &libc_cfgs {
-        cfg.cfg(f, None);
-    }
+    cfg.skip_private(true);
+
+    // Skip anonymous unions/structs.
+    cfg.skip_union(|u| u.ident().starts_with("__c_anonymous_"));
+    cfg.skip_struct(|s| s.ident().starts_with("__c_anonymous_"));
+    cfg.skip_alias(|ty| ty.ident().starts_with("__c_anonymous_"));
+
+    // __uint128 is not declared in C, but is an alias we export.
+    // FIXME(1.0): These aliases will eventually be removed.
+    cfg.skip_alias(|ty| ty.ident() == "__uint128");
+
     cfg
 }
 
@@ -101,7 +116,10 @@ fn do_semver() {
     // NOTE: Android doesn't include the unix file (or the Linux file) because
     // there are some many definitions missing it's actually easier just to
     // maintain a file for Android.
-    if family != os && os != "android" {
+    // NOTE: AIX and L4Re do not include the unix file because there are
+    // definitions missing on these systems. It is easier to maintain separate
+    // files for them.
+    if family != os && !matches!(os.as_str(), "android" | "aix" | "l4re") && os != "vxworks" {
         process_semver_file(&mut output, &mut semver_root, &family);
     }
     // We don't do semver for unknown targets.
@@ -109,13 +127,13 @@ fn do_semver() {
         process_semver_file(&mut output, &mut semver_root, &vendor);
     }
     process_semver_file(&mut output, &mut semver_root, &os);
-    let os_arch = format!("{}-{}", os, arch);
+    let os_arch = format!("{os}-{arch}");
     process_semver_file(&mut output, &mut semver_root, &os_arch);
-    if target_env != "" {
-        let os_env = format!("{}-{}", os, target_env);
+    if !target_env.is_empty() {
+        let os_env = format!("{os}-{target_env}");
         process_semver_file(&mut output, &mut semver_root, &os_env);
 
-        let os_env_arch = format!("{}-{}-{}", os, target_env, arch);
+        let os_env_arch = format!("{os}-{target_env}-{arch}");
         process_semver_file(&mut output, &mut semver_root, &os_env_arch);
     }
 }
@@ -132,25 +150,25 @@ fn process_semver_file<W: Write, P: AsRef<Path>>(output: &mut W, path: &mut Path
             path.pop();
             return;
         }
-        Err(err) => panic!("unexpected error opening file: {}", err),
+        Err(err) => panic!("unexpected error opening file: {err}"),
     };
     let input = BufReader::new(input_file);
 
-    write!(output, "// Source: {}.\n", path.display()).unwrap();
-    output.write(b"use libc::{\n").unwrap();
+    writeln!(output, "// Source: {}.", path.display()).unwrap();
+    output.write_all(b"use libc::{\n").unwrap();
     for line in input.lines() {
         let line = line.unwrap().into_bytes();
         match line.first() {
             // Ignore comments and empty lines.
             Some(b'#') | None => continue,
             _ => {
-                output.write(b"    ").unwrap();
-                output.write(&line).unwrap();
-                output.write(b",\n").unwrap();
+                output.write_all(b"    ").unwrap();
+                output.write_all(&line).unwrap();
+                output.write_all(b",\n").unwrap();
             }
         }
     }
-    output.write(b"};\n\n").unwrap();
+    output.write_all(b"};\n\n").unwrap();
     path.pop();
 }
 
@@ -164,22 +182,24 @@ fn main() {
 }
 
 macro_rules! headers {
-    ($cfg:ident: [$m:expr]: $header:literal) => {
-        if $m {
-            $cfg.header($header);
-        }
-    };
-    ($cfg:ident: $header:literal) => {
-        $cfg.header($header);
-    };
-    ($($cfg:ident: $([$c:expr]:)* $header:literal,)*) => {
-        $(headers!($cfg: $([$c]:)* $header);)*
-    };
-    ($cfg:ident: $( $([$c:expr]:)* $header:literal,)*) => {
-        headers!($($cfg: $([$c]:)* $header,)*);
-    };
-    ($cfg:ident: $( $([$c:expr]:)* $header:literal),*) => {
-        headers!($($cfg: $([$c]:)* $header,)*);
+    (
+        $cfg:ident,
+        $(
+            // Allow a simple header
+            $($header:literal)?
+            // As well as a style that is conditionally applied.
+            $(($pred:expr, $pred_header:literal))?
+            ,
+        )+
+    ) => {
+        $(
+            $( $cfg.header($header); )?
+            $(
+                if $pred {
+                    $cfg.header($pred_header);
+                }
+            )?
+        )+
     };
 }
 
@@ -189,10 +209,12 @@ fn test_apple(target: &str) {
     let i686 = target.contains("i686");
 
     let mut cfg = ctest_cfg();
+
     cfg.flag("-Wno-deprecated-declarations");
     cfg.define("__APPLE_USE_RFC_3542", None);
 
-    headers! { cfg:
+    headers!(
+        cfg,
         "aio.h",
         "CommonCrypto/CommonCrypto.h",
         "CommonCrypto/CommonRandom.h",
@@ -229,6 +251,7 @@ fn test_apple(target: &str) {
         "net/if.h",
         "net/if_arp.h",
         "net/if_dl.h",
+        "net/if_mib.h",
         "net/if_utun.h",
         "net/if_var.h",
         "net/ndrv.h",
@@ -239,11 +262,11 @@ fn test_apple(target: &str) {
         "netinet/ip.h",
         "netinet/tcp.h",
         "netinet/udp.h",
+        "netinet6/in6_var.h",
         "os/clock.h",
         "os/lock.h",
         "os/signpost.h",
-        // FIXME: Requires the macOS 14.4 SDK.
-        //"os/os_sync_wait_on_address.h",
+        "os/os_sync_wait_on_address.h",
         "poll.h",
         "pthread.h",
         "pthread_spis.h",
@@ -304,108 +327,61 @@ fn test_apple(target: &str) {
         "utmpx.h",
         "wchar.h",
         "xlocale.h",
-        [x86_64]: "crt_externs.h",
-    }
+        (x86_64, "crt_externs.h"),
+    );
 
-    cfg.skip_struct(move |ty| {
-        if ty.starts_with("__c_anonymous_") {
-            return true;
-        }
-        match ty {
-            // FIXME: actually a union
+    cfg.skip_struct(move |s| {
+        match s.ident() {
+            // FIXME(union): actually a union
             "sigval" => true,
-
-            // FIXME: The size is changed in recent macOSes.
+            // FIXME(macos): The size is changed in recent macOSes.
             "malloc_zone_t" => true,
             // it is a moving target, changing through versions
             // also contains bitfields members
             "tcp_connection_info" => true,
-            // FIXME: The size is changed in recent macOSes.
-            "malloc_introspection_t" => true,
 
+            // FIXME(macos): The size is changed in recent macOSes.
+            "malloc_introspection_t" if x86_64 => true,
             _ => false,
         }
     });
 
-    cfg.skip_type(move |ty| {
-        if ty.starts_with("__c_anonymous_") {
-            return true;
-        }
-        match ty {
-            // FIXME: Requires the macOS 14.4 SDK.
-            "os_sync_wake_by_address_flags_t" | "os_sync_wait_on_address_flags_t" => true,
-
-            _ => false,
-        }
-    });
-
-    cfg.skip_const(move |name| {
-        // They're declared via `deprecated_mach` and we don't support it anymore.
-        if name.starts_with("VM_FLAGS_") {
-            return true;
-        }
-        match name {
-            // These OSX constants are removed in Sierra.
+    cfg.skip_const(move |constant| {
+        match constant.ident() {
+            // They're declared via `deprecated_mach` and we don't support it anymore.
+            x if x.starts_with("VM_FLAGS_") => true,
+            // FIXME(deprecated): These OSX constants are removed in Sierra.
             // https://developer.apple.com/library/content/releasenotes/General/APIDiffsMacOS10_12/Swift/Darwin.html
             "KERN_KDENABLE_BG_TRACE" | "KERN_KDDISABLE_BG_TRACE" => true,
-            // FIXME: the value has been changed since Catalina (0xffff0000 -> 0x3fff0000).
-            "SF_SETTABLE" => true,
 
-            // FIXME: XCode 13.1 doesn't have it.
+            // FIXME(deprecated): Removed since 12.0.1 / xnu-8019.41.5. See `ttycom.h` at
+            // https://github.com/apple-oss-distributions/xnu/commit/e6231be02a03711ca404e5121a151b24afbff733
             "TIOCREMOTE" => true,
 
-            // FIXME: Requires the macOS 14.4 SDK.
-            "OS_SYNC_WAKE_BY_ADDRESS_NONE"
-            | "OS_SYNC_WAKE_BY_ADDRESS_SHARED"
-            | "OS_SYNC_WAIT_ON_ADDRESS_NONE"
-            | "OS_SYNC_WAIT_ON_ADDRESS_SHARED" => true,
-
             _ => false,
         }
     });
 
-    cfg.skip_fn(move |name| {
+    cfg.skip_fn(move |func| {
         // skip those that are manually verified
-        match name {
+        match func.ident() {
             // FIXME: https://github.com/rust-lang/libc/issues/1272
             "execv" | "execve" | "execvp" => true,
-
-            // close calls the close_nocancel system call
-            "close" => true,
-
-            // FIXME: std removed libresolv support: https://github.com/rust-lang/rust/pull/102766
+            // close calls the close_nocancel system call on x86
+            "close" if x86_64 => true,
+            // FIXME(1.0): std removed libresolv support: https://github.com/rust-lang/rust/pull/102766
             "res_init" => true,
-
-            // FIXME: remove once the target in CI is updated
-            "pthread_jit_write_freeze_callbacks_np" => true,
-
-            // FIXME: ABI has been changed on recent macOSes.
-            "os_unfair_lock_assert_owner" | "os_unfair_lock_assert_not_owner" => true,
-
-            // FIXME: Once the SDK get updated to Ventura's level
-            "freadlink" | "mknodat" | "mkfifoat" => true,
-
-            // FIXME: Requires the macOS 14.4 SDK.
-            "os_sync_wake_by_address_any"
-            | "os_sync_wake_by_address_all"
-            | "os_sync_wake_by_address_flags_t"
-            | "os_sync_wait_on_address"
-            | "os_sync_wait_on_address_flags_t"
-            | "os_sync_wait_on_address_with_deadline"
-            | "os_sync_wait_on_address_with_timeout" => true,
-
             _ => false,
         }
     });
 
-    cfg.skip_field(move |struct_, field| {
-        match (struct_, field) {
-            // FIXME: the array size has been changed since macOS 10.15 ([8] -> [7]).
-            ("statfs", "f_reserved") => true,
-            ("__darwin_arm_neon_state64", "__v") => true,
+    cfg.skip_struct_field(move |struct_, field| {
+        match (struct_.ident(), field.ident()) {
             // MAXPATHLEN is too big for auto-derive traits on arrays.
             ("vnode_info_path", "vip_path") => true,
+            // Anonymous ADT fields
             ("ifreq", "ifr_ifru") => true,
+            ("in6_ifreq", "ifr_ifru") => true,
             ("ifkpi", "ifk_data") => true,
             ("ifconf", "ifc_ifcu") => true,
             // FIXME: this field has been incorporated into a resized `rmx_filler` array.
@@ -415,58 +391,49 @@ fn test_apple(target: &str) {
         }
     });
 
-    cfg.skip_field_type(move |struct_, field| {
-        match (struct_, field) {
-            // FIXME: actually a union
+    cfg.skip_struct_field_type(move |struct_, field| {
+        match (struct_.ident(), field.ident()) {
+            // FIXME(union): actually a union
             ("sigevent", "sigev_value") => true,
             _ => false,
         }
     });
 
-    cfg.volatile_item(|i| {
-        use ctest::VolatileItemKind::*;
-        match i {
-            StructField(ref n, ref f) if n == "aiocb" && f == "aio_buf" => true,
-            _ => false,
-        }
+    cfg.volatile_struct_field(|s, f| s.ident() == "aiocb" && f.ident() == "aio_buf");
+
+    cfg.rename_struct_ty(move |ty| {
+        // Just pass all these through, no need for a "struct" prefix
+        ["FILE", "DIR", "Dl_info"]
+            .contains(&ty)
+            .then_some(ty.to_string())
     });
 
-    cfg.type_name(move |ty, is_struct, is_union| {
-        match ty {
-            // Just pass all these through, no need for a "struct" prefix
-            "FILE" | "DIR" | "Dl_info" => ty.to_string(),
+    // OSX calls this something else
+    cfg.rename_type(|ty| (ty == "sighandler_t").then_some("sig_t".to_string()));
 
-            // OSX calls this something else
-            "sighandler_t" => "sig_t".to_string(),
+    cfg.rename_struct_ty(|ty| ty.ends_with("_t").then_some(ty.to_string()));
+    cfg.rename_union_ty(|ty| ty.ends_with("_t").then_some(ty.to_string()));
 
-            t if is_union => format!("union {}", t),
-            t if t.ends_with("_t") => t.to_string(),
-            t if is_struct => format!("struct {}", t),
-            t => t.to_string(),
-        }
-    });
-
-    cfg.field_name(move |struct_, field| {
-        match field {
-            s if s.ends_with("_nsec") && struct_.starts_with("stat") => {
-                s.replace("e_nsec", "espec.tv_nsec")
+    cfg.rename_struct_field(|s, f| {
+        match f.ident() {
+            n if n.ends_with("_nsec") && s.ident().starts_with("stat") => {
+                Some(n.replace("e_nsec", "espec.tv_nsec"))
             }
-            // FIXME: sigaction actually contains a union with two variants:
+            // FIXME(macos): sigaction actually contains a union with two variants:
             // a sa_sigaction with type: (*)(int, struct __siginfo *, void *)
             // a sa_handler with type sig_t
-            "sa_sigaction" if struct_ == "sigaction" => "sa_handler".to_string(),
-            s => s.to_string(),
+            "sa_sigaction" if s.ident() == "sigaction" => Some("sa_handler".to_string()),
+            _ => None,
         }
     });
 
     cfg.skip_roundtrip(move |s| match s {
-        // FIXME: this type has the wrong ABI
+        // FIXME(macos): this type has the wrong ABI
         "max_align_t" if i686 => true,
-        // Can't return an array from a C function.
-        "uuid_t" | "vol_capabilities_set_t" => true,
         _ => false,
     });
-    cfg.generate("../src/lib.rs", "main.rs");
+
+    ctest::generate_test(&mut cfg, "../src/lib.rs", "ctest_output.rs").unwrap();
 }
 
 fn test_openbsd(target: &str) {
@@ -477,7 +444,8 @@ fn test_openbsd(target: &str) {
 
     let x86_64 = target.contains("x86_64");
 
-    headers! { cfg:
+    headers!(
+        cfg,
         "elf.h",
         "errno.h",
         "execinfo.h",
@@ -499,7 +467,7 @@ fn test_openbsd(target: &str) {
         "ctype.h",
         "dirent.h",
         "sys/socket.h",
-        [x86_64]:"machine/fpu.h",
+        (x86_64, "machine/fpu.h"),
         "net/if.h",
         "net/route.h",
         "net/if_arp.h",
@@ -560,22 +528,45 @@ fn test_openbsd(target: &str) {
         "sys/syscall.h",
         "sys/shm.h",
         "sys/param.h",
-    }
+        "sys/auxv.h",
+    );
 
-    cfg.skip_struct(move |ty| {
-        if ty.starts_with("__c_anonymous_") {
-            return true;
-        }
+    cfg.rename_type(|ty| match ty {
+        // FIXME(openbsd): https://github.com/rust-lang/libc/issues/1273
+        "sighandler_t" => Some("sig_t".to_string()),
+        _ => None,
+    });
+
+    cfg.rename_struct_ty(move |ty| {
         match ty {
-            // FIXME: actually a union
-            "sigval" => true,
+            // Just pass all these through, no need for a "struct" prefix
+            "FILE" | "DIR" | "Dl_info" | "Elf32_Phdr" | "Elf64_Phdr" => Some(ty.to_string()),
 
-            _ => false,
+            _ => None,
         }
     });
 
-    cfg.skip_const(move |name| {
-        match name {
+    cfg.rename_struct_field(|struct_, field_| {
+        let struct_ = struct_.ident();
+        let replacement = match field_.ident() {
+            "st_birthtime" if struct_.starts_with("stat") => "__st_birthtime".to_string(),
+            "st_birthtime_nsec" if struct_.starts_with("stat") => "__st_birthtimensec".to_string(),
+
+            // Our stat *_nsec fields normally don't actually exist but are part
+            // of a timeval struct
+            s if s.ends_with("_nsec") && struct_.starts_with("stat") => {
+                s.replace("e_nsec", ".tv_nsec")
+            }
+
+            "sa_sigaction" if struct_ == "sigaction" => "sa_handler".to_string(),
+
+            _ => return None,
+        };
+        Some(replacement)
+    });
+
+    cfg.skip_const(move |constant| {
+        match constant.ident() {
             // Removed in OpenBSD 6.0
             "KERN_USERMOUNT" | "KERN_ARND" => true,
             // Removed in OpenBSD 7.2
@@ -583,21 +574,25 @@ fn test_openbsd(target: &str) {
             // Good chance it's going to be wrong depending on the host release
             "KERN_MAXID" | "NET_RT_MAXID" => true,
             "EV_SYSFLAGS" => true,
+
+            // Removed in OpenBSD 7.7 (unused since 1991)
+            "ATF_COM" | "ATF_PERM" | "ATF_PUBL" | "ATF_USETRAILERS" => true,
+
+            // Removed in OpenBSD 7.8
+            "CTL_FS" | "SO_NETPROC" => true,
+
             _ => false,
         }
     });
 
-    cfg.skip_fn(move |name| {
-        match name {
+    cfg.skip_fn(move |func| {
+        match func.ident() {
             // FIXME: https://github.com/rust-lang/libc/issues/1272
             "execv" | "execve" | "execvp" | "execvpe" => true,
 
             // Removed in OpenBSD 6.5
             // https://marc.info/?l=openbsd-cvs&m=154723400730318
             "mincore" => true,
-
-            // futex() has volatile arguments, but that doesn't exist in Rust.
-            "futex" => true,
 
             // Available for openBSD 7.3
             "mimmutable" => true,
@@ -610,46 +605,200 @@ fn test_openbsd(target: &str) {
         }
     });
 
-    cfg.type_name(move |ty, is_struct, is_union| {
-        match ty {
-            // Just pass all these through, no need for a "struct" prefix
-            "FILE" | "DIR" | "Dl_info" | "Elf32_Phdr" | "Elf64_Phdr" => ty.to_string(),
+    cfg.skip_struct(move |ty| {
+        match ty.ident() {
+            // FIXME(union): actually a union
+            "sigval" => true,
 
-            // OSX calls this something else
-            "sighandler_t" => "sig_t".to_string(),
-
-            t if is_union => format!("union {}", t),
-            t if t.ends_with("_t") => t.to_string(),
-            t if is_struct => format!("struct {}", t),
-            t => t.to_string(),
-        }
-    });
-
-    cfg.field_name(move |struct_, field| match field {
-        "st_birthtime" if struct_.starts_with("stat") => "__st_birthtime".to_string(),
-        "st_birthtime_nsec" if struct_.starts_with("stat") => "__st_birthtimensec".to_string(),
-        s if s.ends_with("_nsec") && struct_.starts_with("stat") => s.replace("e_nsec", ".tv_nsec"),
-        "sa_sigaction" if struct_ == "sigaction" => "sa_handler".to_string(),
-        s => s.to_string(),
-    });
-
-    cfg.skip_field_type(move |struct_, field| {
-        // type siginfo_t.si_addr changed from OpenBSD 6.0 to 6.1
-        struct_ == "siginfo_t" && field == "si_addr"
-    });
-
-    cfg.skip_field(|struct_, field| {
-        match (struct_, field) {
-            // conflicting with `p_type` macro from <resolve.h>.
-            ("Elf32_Phdr", "p_type") => true,
-            ("Elf64_Phdr", "p_type") => true,
-            // ifr_ifru is defined is an union
-            ("ifreq", "ifr_ifru") => true,
             _ => false,
         }
     });
 
-    cfg.generate("../src/lib.rs", "main.rs");
+    cfg.rename_struct_ty(|ty| ty.ends_with("_t").then_some(ty.to_string()));
+    cfg.rename_union_ty(|ty| ty.ends_with("_t").then_some(ty.to_string()));
+
+    cfg.skip_struct_field(move |struct_, field| {
+        match (struct_.ident(), field.ident()) {
+            // conflicting with `p_type` macro from <resolve.h>.
+            ("Elf32_Phdr", "p_type") => true,
+            ("Elf64_Phdr", "p_type") => true,
+
+            // type siginfo_t.si_addr changed from OpenBSD 6.0 to 6.1
+            ("siginfo_t", "si_addr") => true,
+
+            // ifr_ifru is an union
+            ("ifreq", "ifr_ifru") => true,
+
+            _ => false,
+        }
+    });
+
+    ctest::generate_test(&mut cfg, "../src/lib.rs", "ctest_output.rs").unwrap();
+}
+
+fn test_cygwin(target: &str) {
+    assert!(target.contains("cygwin"));
+
+    let mut cfg = ctest_cfg();
+    cfg.define("_GNU_SOURCE", None);
+
+    headers!(
+        cfg,
+        "ctype.h",
+        "dirent.h",
+        "dlfcn.h",
+        "errno.h",
+        "fcntl.h",
+        "fnmatch.h",
+        "grp.h",
+        "iconv.h",
+        "langinfo.h",
+        "limits.h",
+        "locale.h",
+        "net/if.h",
+        "netdb.h",
+        "netinet/tcp.h",
+        "poll.h",
+        "pthread.h",
+        "pty.h",
+        "pwd.h",
+        "resolv.h",
+        "sched.h",
+        "semaphore.h",
+        "signal.h",
+        "spawn.h",
+        "stddef.h",
+        "stdlib.h",
+        "stdio.h",
+        "string.h",
+        "sys/cpuset.h",
+        "sys/ioctl.h",
+        "sys/mman.h",
+        "sys/mount.h",
+        "sys/param.h",
+        "sys/quota.h",
+        "sys/random.h",
+        "sys/resource.h",
+        "sys/select.h",
+        "sys/socket.h",
+        "sys/statvfs.h",
+        "sys/times.h",
+        "sys/types.h",
+        "sys/uio.h",
+        "sys/un.h",
+        "sys/utsname.h",
+        "sys/vfs.h",
+        "syslog.h",
+        "termios.h",
+        "unistd.h",
+        "utime.h",
+        "utmpx.h",
+        "wait.h",
+        "wchar.h",
+    );
+
+    cfg.rename_type(|ty| match ty {
+        "Ioctl" => Some("int".to_string()),
+        _ => None,
+    });
+
+    cfg.rename_struct_ty(move |ty| {
+        match ty {
+            // Just pass all these through, no need for a "struct" prefix
+            "FILE" | "DIR" | "Dl_info" | "fd_set" => Some(ty.to_string()),
+
+            // sigval is a struct in Rust, but a union in C:
+            "sigval" => Some("union sigval".to_string()),
+
+            t if t.ends_with("_t") => Some(t.to_string()),
+
+            _ => None,
+        }
+    });
+
+    cfg.skip_const(move |constant| {
+        match constant.ident() {
+            // FIXME(cygwin): these constants do not exist on Cygwin
+            "ARPOP_REQUEST" | "ARPOP_REPLY" | "ATF_COM" | "ATF_PERM" | "ATF_PUBL"
+            | "ATF_USETRAILERS" => true,
+
+            // not defined on Cygwin, but [get|set]priority is, so they are
+            // useful
+            "PRIO_MIN" | "PRIO_MAX" => true,
+
+            // The following does not exist on Cygwin but is required by
+            // several crates
+            "FIOCLEX" | "SA_NOCLDWAIT" => true,
+
+            _ => false,
+        }
+    });
+
+    cfg.skip_signededness(move |c| match c {
+        n if n.starts_with("pthread") => true,
+
+        // For consistency with other platforms. Actually a function ptr.
+        "sighandler_t" => true,
+
+        _ => false,
+    });
+
+    cfg.rename_struct_field(move |struct_, field| {
+        match field.ident() {
+            // Our stat *_nsec fields normally don't actually exist but are part
+            // of a timeval struct
+            s if s.ends_with("_nsec") && struct_.ident().starts_with("stat") => {
+                Some(s.replace("e_nsec", ".tv_nsec"))
+            }
+
+            // FIXME(cygwin): sigaction actually contains a union with two variants:
+            // a sa_sigaction with type: (*)(int, struct __siginfo *, void *)
+            // a sa_handler with type sig_t
+            "sa_sigaction" if struct_.ident() == "sigaction" => Some("sa_handler".to_string()),
+
+            _ => None,
+        }
+    });
+
+    cfg.skip_struct_field(|struct_, field| {
+        match (struct_.ident(), field.ident()) {
+            // this is actually a union on linux, so we can't represent it well and
+            // just insert some padding.
+            ("ifreq", "ifr_ifru") => true,
+            ("ifconf", "ifc_ifcu") => true,
+
+            _ => false,
+        }
+    });
+
+    cfg.skip_fn(move |func| {
+        // skip those that are manually verified
+        match func.ident() {
+            // There are two versions of the sterror_r function, see
+            //
+            // https://linux.die.net/man/3/strerror_r
+            //
+            // An XSI-compliant version provided if:
+            //
+            // (_POSIX_C_SOURCE >= 200112L || _XOPEN_SOURCE >= 600) && ! _GNU_SOURCE
+            //
+            // and a GNU specific version provided if _GNU_SOURCE is defined.
+            //
+            // libc provides bindings for the XSI-compliant version, which is
+            // preferred for portable applications.
+            //
+            // We skip the test here since here _GNU_SOURCE is defined, and
+            // test the XSI version below.
+            "strerror_r" => true,
+
+            // FIXME(cygwin): does not exist on Cygwin
+            "mlockall" | "munlockall" => true,
+
+            _ => false,
+        }
+    });
+
+    ctest::generate_test(&mut cfg, "../src/lib.rs", "ctest_output.rs").unwrap();
 }
 
 fn test_windows(target: &str) {
@@ -658,12 +807,14 @@ fn test_windows(target: &str) {
     let i686 = target.contains("i686");
 
     let mut cfg = ctest_cfg();
+
     if target.contains("msvc") {
         cfg.flag("/wd4324");
     }
     cfg.define("_WIN32_WINNT", Some("0x8000"));
 
-    headers! { cfg:
+    headers!(
+        cfg,
         "direct.h",
         "errno.h",
         "fcntl.h",
@@ -681,81 +832,71 @@ fn test_windows(target: &str) {
         "sys/utime.h",
         "time.h",
         "wchar.h",
-        [gnu]: "ws2tcpip.h",
-        [!gnu]: "Winsock2.h",
-    }
+        (gnu, "ws2tcpip.h"),
+        (!gnu, "Winsock2.h"),
+    );
 
-    cfg.type_name(move |ty, is_struct, is_union| {
+    cfg.rename_struct_ty(|ty| {
         match ty {
             // Just pass all these through, no need for a "struct" prefix
-            "FILE" | "DIR" | "Dl_info" => ty.to_string(),
+            "FILE" | "DIR" | "Dl_info" => ty.to_string().into(),
+            t if t.ends_with("_t") => t.to_string().into(),
+            // Windows uppercase structs don't have `struct` in fr.into()ont:
+            t if ty.chars().next().unwrap().is_uppercase() => t.to_string().into(),
+            "stat" => "struct __stat64".to_string().into(),
+            "utimbuf" => "struct __utimbuf64".to_string().into(),
+            _ => None,
+        }
+    });
+    cfg.rename_type(move |ty| {
+        match ty {
+            // FIXME(windows): these don't exist:
+            "time64_t" => "__time64_t".to_string().into(),
+            "ssize_t" => "SSIZE_T".to_string().into(),
 
-            // FIXME: these don't exist:
-            "time64_t" => "__time64_t".to_string(),
-            "ssize_t" => "SSIZE_T".to_string(),
-
-            "sighandler_t" if !gnu => "_crt_signal_t".to_string(),
-            "sighandler_t" if gnu => "__p_sig_fn_t".to_string(),
-
-            t if is_union => format!("union {}", t),
-            t if t.ends_with("_t") => t.to_string(),
-
-            // Windows uppercase structs don't have `struct` in front:
-            t if is_struct => {
-                if ty.chars().next().unwrap().is_uppercase() {
-                    t.to_string()
-                } else if t == "stat" {
-                    "struct __stat64".to_string()
-                } else if t == "utimbuf" {
-                    "struct __utimbuf64".to_string()
-                } else {
-                    // put `struct` in front of all structs:
-                    format!("struct {}", t)
-                }
-            }
-            t => t.to_string(),
+            "sighandler_t" if !gnu => "_crt_signal_t".to_string().into(),
+            "sighandler_t" if gnu => "__p_sig_fn_t".to_string().into(),
+            _ => None,
         }
     });
 
-    cfg.fn_cname(move |name, cname| cname.unwrap_or(name).to_string());
+    cfg.rename_fn(move |func| {
+        func.link_name()
+            .map(|l| l.to_string())
+            .or(func.ident().to_string().into())
+    });
 
-    cfg.skip_type(move |name| match name {
+    cfg.skip_alias(move |alias| match alias.ident() {
         "SSIZE_T" if !gnu => true,
         "ssize_t" if !gnu => true,
-        // FIXME: The size and alignment of this type are incorrect
+        // FIXME(windows): The size and alignment of this type are incorrect
         "time_t" if gnu && i686 => true,
         _ => false,
     });
 
-    cfg.skip_struct(move |ty| {
-        if ty.starts_with("__c_anonymous_") {
-            return true;
-        }
-        match ty {
-            // FIXME: The size and alignment of this struct are incorrect
+    cfg.skip_struct(move |struct_| {
+        match struct_.ident() {
+            // FIXME(windows): The size and alignment of this struct are incorrect
             "timespec" if gnu && i686 => true,
             _ => false,
         }
     });
 
-    cfg.skip_const(move |name| {
-        match name {
-            // FIXME: API error:
+    cfg.skip_const(move |constant| {
+        match constant.ident() {
+            // FIXME(windows): API error:
             // SIG_ERR type is "void (*)(int)", not "int"
             "SIG_ERR" |
             // Similar for SIG_DFL/IGN/GET/SGE/ACK
             "SIG_DFL" | "SIG_IGN" | "SIG_GET" | "SIG_SGE" | "SIG_ACK" => true,
-            // FIXME: newer windows-gnu environment on CI?
+            // FIXME(windows): newer windows-gnu environment on CI?
             "_O_OBTAIN_DIR" if gnu => true,
             _ => false,
         }
     });
 
-    cfg.skip_field(move |s, field| match s {
-        "CONTEXT" if field == "Fp" => true,
-        _ => false,
-    });
-    // FIXME: All functions point to the wrong addresses?
+    cfg.skip_struct_field(move |s, field| s.ident() == "CONTEXT" && field.ident() == "Fp");
+    // FIXME(windows): All functions point to the wrong addresses?
     cfg.skip_fn_ptrcheck(|_| true);
 
     cfg.skip_signededness(move |c| {
@@ -769,8 +910,8 @@ fn test_windows(target: &str) {
         }
     });
 
-    cfg.skip_fn(move |name| {
-        match name {
+    cfg.skip_fn(move |func| {
+        match func.ident() {
             // FIXME: https://github.com/rust-lang/libc/issues/1272
             "execv" | "execve" | "execvp" | "execvpe" => true,
 
@@ -778,7 +919,7 @@ fn test_windows(target: &str) {
         }
     });
 
-    cfg.generate("../src/lib.rs", "main.rs");
+    ctest::generate_test(&mut cfg, "../src/lib.rs", "ctest_output.rs").unwrap();
 }
 
 fn test_redox(target: &str) {
@@ -787,8 +928,8 @@ fn test_redox(target: &str) {
     let mut cfg = ctest_cfg();
     cfg.flag("-Wno-deprecated-declarations");
 
-    headers! {
-        cfg:
+    headers!(
+        cfg,
         "ctype.h",
         "dirent.h",
         "dlfcn.h",
@@ -826,9 +967,9 @@ fn test_redox(target: &str) {
         "unistd.h",
         "utime.h",
         "wchar.h",
-    }
+    );
 
-    cfg.generate("../src/lib.rs", "main.rs");
+    ctest::generate_test(&mut cfg, "../src/lib.rs", "ctest_output.rs").unwrap();
 }
 
 fn test_solarish(target: &str) {
@@ -845,8 +986,16 @@ fn test_solarish(target: &str) {
     cfg.define("__EXTENSIONS__", None);
     cfg.define("_LCONV_C99", None);
 
-    headers! {
-        cfg:
+    // FIXME(solaris): This should be removed once new Nix crate is released.
+    // See comment in src/unix/solarish/solaris.rs for these.
+    if is_solaris {
+        cfg.define("O_DIRECT", Some("0x2000000"));
+        cfg.define("SIGINFO", Some("41"));
+    }
+
+    headers!(
+        cfg,
+        "aio.h",
         "ctype.h",
         "dirent.h",
         "dlfcn.h",
@@ -880,6 +1029,7 @@ fn test_solarish(target: &str) {
         "sched.h",
         "semaphore.h",
         "signal.h",
+        "spawn.h",
         "stddef.h",
         "stdint.h",
         "stdio.h",
@@ -923,50 +1073,48 @@ fn test_solarish(target: &str) {
         "utime.h",
         "utmpx.h",
         "wchar.h",
-    }
+    );
 
     if is_illumos {
-        headers! { cfg:
-            "sys/epoll.h",
-            "sys/eventfd.h",
-        }
+        headers!(cfg, "sys/epoll.h", "sys/eventfd.h",);
     }
 
     if is_solaris {
-        headers! { cfg:
-            "sys/lgrp_user_impl.h",
-        }
+        headers!(cfg, "sys/lgrp_user_impl.h",);
     }
 
-    cfg.skip_type(move |ty| match ty {
+    cfg.skip_alias(move |ty| match ty.ident() {
         "sighandler_t" => true,
         _ => false,
     });
 
-    cfg.type_name(move |ty, is_struct, is_union| match ty {
-        "FILE" => "__FILE".to_string(),
-        "DIR" | "Dl_info" => ty.to_string(),
-        t if t.ends_with("_t") => t.to_string(),
-        t if is_struct => format!("struct {}", t),
-        t if is_union => format!("union {}", t),
-        t => t.to_string(),
+    cfg.rename_union_ty(|ty| match ty {
+        t if t.ends_with("_t") => Some(t.to_string()),
+        _ => None,
     });
 
-    cfg.field_name(move |struct_, field| {
-        match struct_ {
+    cfg.rename_struct_ty(move |ty| match ty {
+        "FILE" => Some("__FILE".to_string()),
+        "DIR" | "Dl_info" => Some(ty.to_string()),
+        t if t.ends_with("_t") => Some(t.to_string()),
+        _ => None,
+    });
+
+    cfg.rename_struct_field(move |struct_, field| {
+        match struct_.ident() {
             // rust struct uses raw u64, rather than union
-            "epoll_event" if field == "u64" => "data.u64".to_string(),
+            "epoll_event" if field.ident() == "u64" => Some("data.u64".to_string()),
             // rust struct was committed with typo for Solaris
-            "door_arg_t" if field == "dec_num" => "desc_num".to_string(),
-            "stat" if field.ends_with("_nsec") => {
+            "door_arg_t" if field.ident() == "dec_num" => Some("desc_num".to_string()),
+            "stat" if field.ident().ends_with("_nsec") => {
                 // expose stat.Xtim.tv_nsec fields
-                field.trim_end_matches("e_nsec").to_string() + ".tv_nsec"
+                Some(field.ident().trim_end_matches("e_nsec").to_string() + ".tv_nsec")
             }
-            _ => field.to_string(),
+            _ => None,
         }
     });
 
-    cfg.skip_const(move |name| match name {
+    cfg.skip_const(move |constant| match constant.ident() {
         "DT_FIFO" | "DT_CHR" | "DT_DIR" | "DT_BLK" | "DT_REG" | "DT_LNK" | "DT_SOCK"
         | "USRQUOTA" | "GRPQUOTA" | "PRIO_MIN" | "PRIO_MAX" => true,
 
@@ -992,15 +1140,19 @@ fn test_solarish(target: &str) {
         _ => false,
     });
 
-    cfg.skip_struct(move |ty| {
-        if ty.starts_with("__c_anonymous_") {
-            return true;
-        }
+    cfg.skip_union(|union_| {
         // the union handling is a mess
-        if ty.contains("door_desc_t_") {
+        if union_.ident().contains("door_desc_t_") {
             return true;
         }
-        match ty {
+        false
+    });
+    cfg.skip_struct(move |struct_| {
+        // the union handling is a mess
+        if struct_.ident().contains("door_desc_t_") {
+            return true;
+        }
+        match struct_.ident() {
             // union, not a struct
             "sigval" => true,
             // a bunch of solaris-only fields
@@ -1009,41 +1161,44 @@ fn test_solarish(target: &str) {
         }
     });
 
-    cfg.skip_field(move |s, field| {
-        match s {
+    cfg.skip_struct_field_type(move |struct_, field| {
+        // aio_buf is "volatile void*"
+        struct_.ident() == "aiocb" && field.ident() == "aio_buf"
+    });
+
+    cfg.skip_struct_field(move |s, field| {
+        match (s.ident(), field.ident()) {
             // C99 sizing on this is tough
-            "dirent" if field == "d_name" => true,
+            ("dirent", "d_name") => true,
             // the union/macro makes this rough
-            "sigaction" if field == "sa_sigaction" => true,
+            ("sigaction", "sa_sigaction") => true,
             // Missing in illumos
-            "sigevent" if field == "ss_sp" => true,
+            ("sigevent", "ss_sp") => true,
             // Avoid sigval union issues
-            "sigevent" if field == "sigev_value" => true,
+            ("sigevent", "sigev_value") => true,
             // const issues
-            "sigevent" if field == "sigev_notify_attributes" => true,
+            ("sigevent", "sigev_notify_attributes") => true,
 
             // Avoid const and union issues
-            "door_arg" if field == "desc_ptr" => true,
-            "door_desc_t" if field == "d_data" => true,
-            "door_arg_t" if field.ends_with("_ptr") => true,
-            "door_arg_t" if field.ends_with("rbuf") => true,
+            ("door_arg", "desc_ptr") => true,
+            ("door_desc_t", "d_data") => true,
+            ("door_arg_t", f) if f.ends_with("_ptr") => true,
+            ("door_arg_t", f) if f.ends_with("rbuf") => true,
 
             // anonymous union challenges
-            "fpregset_t" if field == "fp_reg_set" => true,
+            ("fpregset_t", "fp_reg_set") => true,
 
             // The LX brand (integrated into some illumos distros) commandeered several of the
             // `uc_filler` fields to use for brand-specific state.
-            "ucontext_t" if is_illumos && (field == "uc_filler" || field == "uc_brand_data") => {
-                true
-            }
+            ("ucontext_t", "uc_filler" | "uc_brand_data") if is_illumos => true,
 
             _ => false,
         }
     });
 
-    cfg.skip_fn(move |name| {
+    cfg.skip_fn(move |func| {
         // skip those that are manually verified
-        match name {
+        match func.ident() {
             // const-ness only added recently
             "dladdr" => true,
 
@@ -1052,7 +1207,7 @@ fn test_solarish(target: &str) {
             // are still ABI compatible. We can wait for the next major release
             // to be compliant with the new API.
             //
-            // FIXME: unskip these for next major release
+            // FIXME(solarish): unskip these for next major release
             "setpriority" | "personality" => true,
 
             // signal is defined in terms of sighandler_t, so ignore
@@ -1063,6 +1218,9 @@ fn test_solarish(target: &str) {
 
             // const-ness issues
             "execv" | "execve" | "execvp" | "settimeofday" | "sethostname" => true,
+
+            // FIXME(1.0): https://github.com/rust-lang/libc/issues/1272
+            "fexecve" => true,
 
             // Solaris-different
             "getpwent_r" | "getgrent_r" | "updwtmpx" if is_illumos => true,
@@ -1087,22 +1245,38 @@ fn test_solarish(target: &str) {
             // excluded from the tests.
             "getifaddrs" if is_illumos => true,
 
+            // FIXME(ctest): Our API is unsound. The Rust API allows aliasing
+            // pointers, but the C API requires pointers not to alias.
+            // We should probably be at least using `&`/`&mut` here, see:
+            // https://github.com/gnzlbg/ctest/issues/68
+            "lio_listio" => true,
+
+            // Exists on illumos too but, for now, is
+            // [a recent addition](https://www.illumos.org/issues/17094).
+            "secure_getenv" if is_illumos => true,
+
             _ => false,
         }
     });
 
-    cfg.generate("../src/lib.rs", "main.rs");
+    ctest::generate_test(&mut cfg, "../src/lib.rs", "ctest_output.rs").unwrap();
 }
 
 fn test_netbsd(target: &str) {
     assert!(target.contains("netbsd"));
     let mut cfg = ctest_cfg();
 
+    // Assume netbsd10 but check for netbsd9 for test config.
+    let netbsd9 = match try_command_output("uname", &["-sr"]) {
+        Some(s) if s.starts_with("NetBSD 9.") => true,
+        _ => false,
+    };
+
     cfg.flag("-Wno-deprecated-declarations");
     cfg.define("_NETBSD_SOURCE", Some("1"));
 
-    headers! {
-        cfg:
+    headers!(
+        cfg,
         "elf.h",
         "errno.h",
         "fcntl.h",
@@ -1124,10 +1298,12 @@ fn test_netbsd(target: &str) {
         "ctype.h",
         "dirent.h",
         "dlfcn.h",
+        "execinfo.h",
         "glob.h",
         "grp.h",
         "ifaddrs.h",
         "langinfo.h",
+        "lwp.h",
         "net/bpf.h",
         "net/if.h",
         "net/if_arp.h",
@@ -1146,12 +1322,14 @@ fn test_netbsd(target: &str) {
         "sched.h",
         "semaphore.h",
         "signal.h",
+        "spawn.h",
         "string.h",
         "sys/endian.h",
         "sys/exec_elf.h",
         "sys/xattr.h",
         "sys/extattr.h",
         "sys/file.h",
+        (!netbsd9, "sys/futex.h"),
         "sys/ioctl.h",
         "sys/ioctl_compat.h",
         "sys/ipc.h",
@@ -1159,12 +1337,15 @@ fn test_netbsd(target: &str) {
         "sys/mman.h",
         "sys/mount.h",
         "sys/ptrace.h",
+        (!netbsd9, "sys/random.h"),
         "sys/resource.h",
+        "sys/sched.h",
         "sys/shm.h",
         "sys/socket.h",
         "sys/statvfs.h",
         "sys/sysctl.h",
         "sys/time.h",
+        (!netbsd9, "sys/timerfd.h"),
         "sys/times.h",
         "sys/timex.h",
         "sys/ucontext.h",
@@ -1183,63 +1364,73 @@ fn test_netbsd(target: &str) {
         "mqueue.h",
         "netinet/dccp.h",
         "sys/event.h",
+        (!netbsd9, "sys/eventfd.h"),
         "sys/quota.h",
         "sys/reboot.h",
         "sys/shm.h",
         "iconv.h",
-    }
+        "utmp.h",
+        "utmpx.h",
+    );
 
-    cfg.type_name(move |ty, is_struct, is_union| {
+    cfg.rename_type(move |ty| {
         match ty {
-            // Just pass all these through, no need for a "struct" prefix
-            "FILE" | "fd_set" | "Dl_info" | "DIR" | "Elf32_Phdr" | "Elf64_Phdr" | "Elf32_Shdr"
-            | "Elf64_Shdr" | "Elf32_Sym" | "Elf64_Sym" | "Elf32_Ehdr" | "Elf64_Ehdr"
-            | "Elf32_Chdr" | "Elf64_Chdr" => ty.to_string(),
-
             // OSX calls this something else
-            "sighandler_t" => "sig_t".to_string(),
+            "sighandler_t" => Some("sig_t".to_string()),
 
-            t if is_union => format!("union {}", t),
-
-            t if t.ends_with("_t") => t.to_string(),
-
-            // put `struct` in front of all structs:.
-            t if is_struct => format!("struct {}", t),
-
-            t => t.to_string(),
+            _ => None,
         }
     });
 
-    cfg.field_name(move |struct_, field| {
-        match field {
+    cfg.rename_struct_ty(|ty| match ty {
+        // Just pass all these through, no need for a "struct" prefix
+        "FILE" | "fd_set" | "Dl_info" | "DIR" | "Elf32_Phdr" | "Elf64_Phdr" | "Elf32_Shdr"
+        | "Elf64_Shdr" | "Elf32_Sym" | "Elf64_Sym" | "Elf32_Ehdr" | "Elf64_Ehdr" | "Elf32_Chdr"
+        | "Elf64_Chdr" => Some(ty.to_string()),
+        t if t.ends_with("_t") => Some(t.to_string()),
+        _ => None,
+    });
+
+    cfg.rename_struct_field(move |struct_, field| {
+        match field.ident() {
             // Our stat *_nsec fields normally don't actually exist but are part
             // of a timeval struct
-            s if s.ends_with("_nsec") && struct_.starts_with("stat") => {
-                s.replace("e_nsec", ".tv_nsec")
+            s if s.ends_with("_nsec") && struct_.ident().starts_with("stat") => {
+                Some(s.replace("e_nsec", ".tv_nsec"))
             }
-            "u64" if struct_ == "epoll_event" => "data.u64".to_string(),
-            s => s.to_string(),
+            "u64" if struct_.ident() == "epoll_event" => Some("data.u64".to_string()),
+            _ => None,
         }
     });
 
-    cfg.skip_type(move |ty| {
-        if ty.starts_with("__c_anonymous_") {
-            return true;
-        }
-        match ty {
-            // FIXME: sighandler_t is crazy across platforms
+    cfg.alias_is_c_enum(|ty| ty == "fae_action");
+
+    cfg.skip_alias(move |ty| {
+        match ty.ident() {
+            // FIXME(netbsd): sighandler_t is crazy across platforms
             "sighandler_t" => true,
+            // Incomplete type in C
+            "cpuset_t" => true,
+            "eventfd_t" if netbsd9 => true,
             _ => false,
         }
     });
 
-    cfg.skip_struct(move |ty| {
-        match ty {
+    cfg.skip_struct(move |struct_| {
+        match struct_.ident() {
             // This is actually a union, not a struct
             "sigval" => true,
             // These are tested as part of the linux_fcntl tests since there are
             // header conflicts when including them with all the other structs.
             "termios2" => true,
+            // Anon struct
+            "__exit_status" => true,
+            // FIXME(netbsd): Should be importable but aren't for some reason.
+            "Aux32Info" | "Aux64Info" => true,
+            // deprecated, obsolete upstream
+            "ptrace_lwpinfo" => true,
+            // ABI change in NetBSD10, with symbol versioning.
+            "statvfs" if !netbsd9 => true,
             _ => false,
         }
     });
@@ -1254,10 +1445,13 @@ fn test_netbsd(target: &str) {
         }
     });
 
-    cfg.skip_const(move |name| {
-        match name {
+    cfg.skip_const(move |constant| {
+        match constant.ident() {
             "SIG_DFL" | "SIG_ERR" | "SIG_IGN" => true, // sighandler_t weirdness
             "SIGUNUSED" => true,                       // removed in glibc 2.26
+
+            // deprecated, obsolete upstream
+            "PT_LWPINFO" | "PL_EVENT_NONE" | "PL_EVENT_SIGNAL" | "PL_EVENT_SUSPENDED" => true,
 
             // weird signed extension or something like that?
             "MS_NOUSER" => true,
@@ -1265,48 +1459,120 @@ fn test_netbsd(target: &str) {
             "BOTHER" => true,
             "GRND_RANDOM" | "GRND_INSECURE" | "GRND_NONBLOCK" => true, // netbsd 10 minimum
 
+            // Due to the NetBSD `__BIT` macro this turns out to be an `unsigned long`, but
+            // the futex syscall takes `int` ops.
+            "FUTEX_CMD_MASK" => true,
+
             _ => false,
         }
     });
 
-    cfg.skip_fn(move |name| {
-        match name {
-            // FIXME: https://github.com/rust-lang/libc/issues/1272
+    cfg.skip_fn(move |func| {
+        #[expect(clippy::wildcard_in_or_patterns)]
+        match func.ident() {
+            // FIXME(netbsd): https://github.com/rust-lang/libc/issues/1272
             "execv" | "execve" | "execvp" => true,
-            // FIXME: netbsd 10 minimum
-            "getentropy" | "getrandom" => true,
+            // FIXME(netbsd): Look into setting `_POSIX_C_SOURCE` to enable this
+            "qsort_r" => true,
 
-            "getrlimit" | "getrlimit64" |    // non-int in 1st arg
-            "setrlimit" | "setrlimit64" |    // non-int in 1st arg
-            "prlimit" | "prlimit64" |        // non-int in 2nd arg
+            "eventfd" | "eventfd_read" | "eventfd_write" if netbsd9 => true,
 
             _ => false,
         }
     });
 
-    cfg.skip_field_type(move |struct_, field| {
-        // This is a weird union, don't check the type.
-        (struct_ == "ifaddrs" && field == "ifa_ifu") ||
-        // sighandler_t type is super weird
-        (struct_ == "sigaction" && field == "sa_sigaction") ||
-        // sigval is actually a union, but we pretend it's a struct
-        (struct_ == "sigevent" && field == "sigev_value") ||
-        // aio_buf is "volatile void*" and Rust doesn't understand volatile
-        (struct_ == "aiocb" && field == "aio_buf")
+    cfg.skip_fn_ptrcheck(move |func| {
+        match func {
+            // New symbol version present in NetBSD10, but we keep the old versions for NetBSD9
+            // compatibility.
+            "getmntinfo" | "statvfs" | "fstatvfs" | "getvfsstat" | "sigaction" => true,
+            _ => false,
+        }
     });
 
-    cfg.skip_field(|struct_, field| {
-        match (struct_, field) {
+    cfg.skip_struct_field_type(move |struct_, field| {
+        match (struct_.ident(), field.ident()) {
+            // This is a weird union, don't check the type.
+            ("ifaddrs", "ifa_ifu") => true,
+            // sighandler_t type is super weird
+            ("sigaction", "sa_sigaction") => true,
+            // sigval is actually a union, but we pretend it's a struct
+            ("sigevent", "sigev_value") => true,
+            // aio_buf is "volatile void*" and Rust doesn't understand volatile
+            ("aiocb", "aio_buf") => true,
+            _ => false,
+        }
+    });
+
+    cfg.skip_struct_field(|struct_, field| {
+        match (struct_.ident(), field.ident()) {
             // conflicting with `p_type` macro from <resolve.h>.
             ("Elf32_Phdr", "p_type") => true,
             ("Elf64_Phdr", "p_type") => true,
             // pthread_spin_t is a volatile uchar
             ("pthread_spinlock_t", "pts_spin") => true,
+
+            // `tcp_snd_wscale` and `tcp_rcv_wscale` are bitfields
+            ("tcp_info", "tcp_snd_wscale") => true,
+            ("tcp_info", "tcp_rcv_wscale") => true,
+
+            // Anonymous unions
+            ("ifconf", "ifc_ifcu") => true,
+            ("ifreq", "ifr_ifru") => true,
+            ("utmpx", "ut_exit") => true,
+            ("posix_spawn_file_actions_entry_t", "fae_data") => true,
+            ("kinfo_pcb", "ki_s") => true,
+            ("kinfo_pcb", "ki_d") => true,
+
             _ => false,
         }
     });
 
-    cfg.generate("../src/lib.rs", "main.rs");
+    // Unless otherwise noted, everything in this block was an addition in NetBS 10.
+    if netbsd9 {
+        cfg.skip_const(move |constant| match constant.ident() {
+            "EOWNERDEAD"
+            | "ENOTRECOVERABLE"
+            | "F_GETPATH"
+            | "MNT_NFS4ACLS"
+            | "MNT_POSIX1EACLS"
+            | "MNT_ACLS"
+            | "EVFILT_USER"
+            | "EVFILT_EMPTY"
+            | "REG_ILLSEQ"
+            | "PT_SET_SIGPASS"
+            | "PT_GET_SIGPASS"
+            | "EXTATTR_NAMESPACE_EMPTY" => true,
+            x if x.starts_with("FUTEX") => true,
+            x if x.starts_with("NOTE_") => true,
+            x if x.starts_with("PT_LWP") => true,
+            x if x.starts_with("TFD_") => true,
+            "ELAST" => true, // not version-stable
+            _ => false,
+        });
+
+        cfg.skip_struct(move |struct_| match struct_.ident() {
+            "sockaddr_dl" if !netbsd9 => true, // Last field increased size in 10
+            x if x.starts_with("ptrace_lwp") => true,
+            // These were packed before NetBSD 10
+            "arphdr" | "in_addr" | "ip_mreq" | "sockaddr_in" => true,
+            _ => false,
+        });
+
+        cfg.skip_fn(move |func| match func.ident() {
+            "reallocarray" | "getentropy" | "ppoll" | "getrandom" => true,
+            x if x.starts_with("timerfd_") => true,
+            _ => false,
+        });
+
+        cfg.skip_struct_field(|struct_, field| match (struct_.ident(), field.ident()) {
+            ("statvfs", "f_mntfromlabel") => true, // added field
+            ("kevent", "udata") => true,           // changed type (ABI-compatible)
+            _ => false,
+        });
+    }
+
+    ctest::generate_test(&mut cfg, "../src/lib.rs", "ctest_output.rs").unwrap();
 }
 
 fn test_dragonflybsd(target: &str) {
@@ -1314,8 +1580,8 @@ fn test_dragonflybsd(target: &str) {
     let mut cfg = ctest_cfg();
     cfg.flag("-Wno-deprecated-declarations");
 
-    headers! {
-        cfg:
+    headers!(
+        cfg,
         "aio.h",
         "ctype.h",
         "dirent.h",
@@ -1403,62 +1669,58 @@ fn test_dragonflybsd(target: &str) {
         "vm/vm_map.h",
         "wchar.h",
         "iconv.h",
-    }
+    );
 
-    cfg.type_name(move |ty, is_struct, is_union| {
+    cfg.rename_struct_ty(move |ty| {
         match ty {
             // Just pass all these through, no need for a "struct" prefix
             "FILE" | "fd_set" | "Dl_info" | "DIR" | "Elf32_Phdr" | "Elf64_Phdr" | "Elf32_Shdr"
             | "Elf64_Shdr" | "Elf32_Sym" | "Elf64_Sym" | "Elf32_Ehdr" | "Elf64_Ehdr"
-            | "Elf32_Chdr" | "Elf64_Chdr" => ty.to_string(),
+            | "Elf32_Chdr" | "Elf64_Chdr" => Some(ty.to_string()),
 
-            // FIXME: OSX calls this something else
-            "sighandler_t" => "sig_t".to_string(),
-
-            t if is_union => format!("union {}", t),
-
-            t if t.ends_with("_t") => t.to_string(),
+            t if t.ends_with("_t") => Some(t.to_string()),
 
             // sigval is a struct in Rust, but a union in C:
-            "sigval" => format!("union sigval"),
+            "sigval" => Some("union sigval".to_string()),
 
-            // put `struct` in front of all structs:.
-            t if is_struct => format!("struct {}", t),
-
-            t => t.to_string(),
+            _ => None,
         }
     });
 
-    cfg.field_name(move |struct_, field| {
-        match field {
+    cfg.rename_type(|ty| {
+        match ty {
+            // FIXME(dragonflybsd): OSX calls this something else
+            "sighandler_t" => Some("sig_t".to_string()),
+            _ => None,
+        }
+    });
+
+    cfg.rename_struct_field(move |struct_, field| {
+        match field.ident() {
             // Our stat *_nsec fields normally don't actually exist but are part
             // of a timeval struct
-            s if s.ends_with("_nsec") && struct_.starts_with("stat") => {
-                s.replace("e_nsec", ".tv_nsec")
+            s if s.ends_with("_nsec") && struct_.ident().starts_with("stat") => {
+                Some(s.replace("e_nsec", ".tv_nsec"))
             }
-            "u64" if struct_ == "epoll_event" => "data.u64".to_string(),
+            "u64" if struct_.ident() == "epoll_event" => Some("data.u64".to_string()),
             // Field is named `type` in C but that is a Rust keyword,
             // so these fields are translated to `type_` in the bindings.
-            "type_" if struct_ == "rtprio" => "type".to_string(),
-            s => s.to_string(),
+            "type_" if struct_.ident() == "rtprio" => Some("type".to_string()),
+            _ => None,
         }
     });
 
-    cfg.skip_type(move |ty| {
-        match ty {
+    cfg.skip_alias(move |ty| {
+        match ty.ident() {
             // sighandler_t is crazy across platforms
             "sighandler_t" => true,
-
             _ => false,
         }
     });
 
-    cfg.skip_struct(move |ty| {
-        if ty.starts_with("__c_anonymous_") {
-            return true;
-        }
-        match ty {
-            // FIXME: These are tested as part of the linux_fcntl tests since
+    cfg.skip_struct(move |struct_| {
+        match struct_.ident() {
+            // FIXME(dragonflybsd): These are tested as part of the linux_fcntl tests since
             // there are header conflicts when including them with all the other
             // structs.
             "termios2" => true,
@@ -1477,13 +1739,12 @@ fn test_dragonflybsd(target: &str) {
             "sem_t" => true,
             // mqd_t is a pointer on DragonFly
             "mqd_t" => true,
-
             _ => false,
         }
     });
 
-    cfg.skip_const(move |name| {
-        match name {
+    cfg.skip_const(move |constant| {
+        match constant.ident() {
             "SIG_DFL" | "SIG_ERR" | "SIG_IGN" => true, // sighandler_t weirdness
 
             // weird signed extension or something like that?
@@ -1498,12 +1759,11 @@ fn test_dragonflybsd(target: &str) {
         }
     });
 
-    cfg.skip_fn(move |name| {
+    cfg.skip_fn(move |func| {
         // skip those that are manually verified
-        match name {
+        match func.ident() {
             // FIXME: https://github.com/rust-lang/libc/issues/1272
             "execv" | "execve" | "execvp" | "fexecve" => true,
-
             "getrlimit" | "getrlimit64" |    // non-int in 1st arg
             "setrlimit" | "setrlimit64" |    // non-int in 1st arg
             "prlimit" | "prlimit64"        // non-int in 2nd arg
@@ -1513,26 +1773,32 @@ fn test_dragonflybsd(target: &str) {
         }
     });
 
-    cfg.skip_field_type(move |struct_, field| {
-        // This is a weird union, don't check the type.
-        (struct_ == "ifaddrs" && field == "ifa_ifu") ||
-        // sighandler_t type is super weird
-        (struct_ == "sigaction" && field == "sa_sigaction") ||
-        // sigval is actually a union, but we pretend it's a struct
-        (struct_ == "sigevent" && field == "sigev_value") ||
-        // aio_buf is "volatile void*" and Rust doesn't understand volatile
-        (struct_ == "aiocb" && field == "aio_buf")
+    cfg.skip_struct_field_type(move |struct_, field| {
+        match (struct_.ident(), field.ident()) {
+            // This is a weird union, don't check the type.
+            ("ifaddrs", "ifa_ifu") => true,
+            // sighandler_t type is super weird
+            ("sigaction", "sa_sigaction") => true,
+            // sigval is actually a union, but we pretend it's a struct
+            ("sigevent", "sigev_value") => true,
+            // aio_buf is "volatile void*" and Rust doesn't understand volatile
+            ("aiocb", "aio_buf") => true,
+            _ => false,
+        }
     });
 
-    cfg.skip_field(move |struct_, field| {
-        // this is actually a union on linux, so we can't represent it well and
-        // just insert some padding.
-        (struct_ == "siginfo_t" && field == "_pad") ||
-        // sigev_notify_thread_id is actually part of a sigev_un union
-        (struct_ == "sigevent" && field == "sigev_notify_thread_id")
+    cfg.skip_struct_field(move |struct_, field| {
+        match (struct_.ident(), field.ident()) {
+            // this is actually a union on linux, so we can't represent it well and
+            // just insert some padding.
+            ("siginfo_t", "_pad") => true,
+            // sigev_notify_thread_id is actually part of a sigev_un union
+            ("sigevent", "sigev_notify_thread_id") => true,
+            _ => false,
+        }
     });
 
-    cfg.generate("../src/lib.rs", "main.rs");
+    ctest::generate_test(&mut cfg, "../src/lib.rs", "ctest_output.rs").unwrap();
 }
 
 fn test_wasi(target: &str) {
@@ -1542,7 +1808,8 @@ fn test_wasi(target: &str) {
     let mut cfg = ctest_cfg();
     cfg.define("_GNU_SOURCE", None);
 
-    headers! { cfg:
+    headers!(
+        cfg,
         "ctype.h",
         "dirent.h",
         "errno.h",
@@ -1552,10 +1819,11 @@ fn test_wasi(target: &str) {
         "limits.h",
         "locale.h",
         "malloc.h",
-        [p2]: "netdb.h",
-        [p2]: "netinet/in.h",
-        [p2]: "netinet/tcp.h",
+        (p2, "netdb.h"),
+        (p2, "netinet/in.h"),
+        (p2, "netinet/tcp.h"),
         "poll.h",
+        "pthread.h",
         "sched.h",
         "stdbool.h",
         "stddef.h",
@@ -1579,42 +1847,27 @@ fn test_wasi(target: &str) {
         "wasi/libc-nocwd.h",
         "wasi/libc.h",
         "wchar.h",
-    }
+    );
 
-    // Currently `ctest2` doesn't support macros-in-static-expressions and will
-    // panic on them. That affects `CLOCK_*` defines in wasi to set this here
-    // to omit them.
-    cfg.cfg("libc_ctest", None);
-
-    // `ctest2` has a hard-coded list of default cfgs which doesn't include
-    // wasip2, which is why it has to be set here manually.
-    if p2 {
-        cfg.cfg("target_env", Some("p2"));
-    }
-
-    cfg.type_name(move |ty, is_struct, is_union| match ty {
-        "FILE" | "fd_set" | "DIR" => ty.to_string(),
-        t if is_union => format!("union {}", t),
-        t if t.starts_with("__wasi") && t.ends_with("_u") => format!("union {}", t),
-        t if t.starts_with("__wasi") && is_struct => format!("struct {}", t),
-        t if t.ends_with("_t") => t.to_string(),
-        t if is_struct => format!("struct {}", t),
-        t => t.to_string(),
+    cfg.rename_struct_ty(move |ty| match ty {
+        "FILE" | "fd_set" | "DIR" => Some(ty.to_string()),
+        t if t.ends_with("_t") => Some(t.to_string()),
+        _ => None,
     });
 
-    cfg.field_name(move |_struct, field| {
-        match field {
+    cfg.rename_struct_field(move |_struct, field| {
+        match field.ident() {
             // deal with fields as rust keywords
-            "type_" => "type".to_string(),
-            s => s.to_string(),
+            "type_" => Some("type".to_string()),
+            _ => None,
         }
     });
 
     // These have a different and internal type in header files and are only
     // used here to generate a pointer to them in bindings so skip these tests.
-    cfg.skip_static(|c| c.starts_with("_CLOCK_"));
+    cfg.skip_static(|s| s.ident().starts_with("_CLOCK_"));
 
-    cfg.skip_const(|c| match c {
+    cfg.skip_const(|c| match c.ident() {
         // These constants aren't yet defined in wasi-libc.
         // Exposing them is being tracked by https://github.com/WebAssembly/wasi-libc/issues/531.
         "SO_BROADCAST" | "SO_LINGER" => true,
@@ -1622,7 +1875,7 @@ fn test_wasi(target: &str) {
         _ => false,
     });
 
-    cfg.skip_fn(|f| match f {
+    cfg.skip_fn(|f| match f.ident() {
         // This function doesn't actually exist in libc's header files
         "__errno_location" => true,
 
@@ -1637,9 +1890,9 @@ fn test_wasi(target: &str) {
 
     // d_name is declared as a flexible array in WASI libc, so it
     // doesn't support sizeof.
-    cfg.skip_field(|s, field| s == "dirent" && field == "d_name");
+    cfg.skip_struct_field(|s, field| s.ident() == "dirent" && field.ident() == "d_name");
 
-    cfg.generate("../src/lib.rs", "main.rs");
+    ctest::generate_test(&mut cfg, "../src/lib.rs", "ctest_output.rs").unwrap();
 }
 
 fn test_android(target: &str) {
@@ -1647,7 +1900,7 @@ fn test_android(target: &str) {
     let target_pointer_width = match target {
         t if t.contains("aarch64") || t.contains("x86_64") => 64,
         t if t.contains("i686") || t.contains("arm") => 32,
-        t => panic!("unsupported target: {}", t),
+        t => panic!("unsupported target: {t}"),
     };
     let x86 = target.contains("i686") || target.contains("x86_64");
     let aarch64 = target.contains("aarch64");
@@ -1655,211 +1908,206 @@ fn test_android(target: &str) {
     let mut cfg = ctest_cfg();
     cfg.define("_GNU_SOURCE", None);
 
-    headers! { cfg:
-               "arpa/inet.h",
-               "ctype.h",
-               "dirent.h",
-               "dlfcn.h",
-               "elf.h",
-               "errno.h",
-               "fcntl.h",
-               "fnmatch.h",
-               "getopt.h",
-               "grp.h",
-               "ifaddrs.h",
-               "libgen.h",
-               "limits.h",
-               "link.h",
-               "linux/sysctl.h",
-               "locale.h",
-               "malloc.h",
-               "net/ethernet.h",
-               "net/if.h",
-               "net/if_arp.h",
-               "net/route.h",
-               "netdb.h",
-               "netinet/in.h",
-               "netinet/ip.h",
-               "netinet/tcp.h",
-               "netinet/udp.h",
-               "netpacket/packet.h",
-               "poll.h",
-               "pthread.h",
-               "pty.h",
-               "pwd.h",
-               "regex.h",
-               "resolv.h",
-               "sched.h",
-               "semaphore.h",
-               "signal.h",
-               "spawn.h",
-               "stddef.h",
-               "stdint.h",
-               "stdio.h",
-               "stdlib.h",
-               "string.h",
-               "sys/auxv.h",
-               "sys/epoll.h",
-               "sys/eventfd.h",
-               "sys/file.h",
-               "sys/fsuid.h",
-               "sys/inotify.h",
-               "sys/ioctl.h",
-               "sys/klog.h",
-               "sys/mman.h",
-               "sys/mount.h",
-               "sys/personality.h",
-               "sys/prctl.h",
-               "sys/ptrace.h",
-               "sys/random.h",
-               "sys/reboot.h",
-               "sys/resource.h",
-               "sys/sendfile.h",
-               "sys/signalfd.h",
-               "sys/socket.h",
-               "sys/stat.h",
-               "sys/statvfs.h",
-               "sys/swap.h",
-               "sys/syscall.h",
-               "sys/sysinfo.h",
-               "sys/system_properties.h",
-               "sys/time.h",
-               "sys/timerfd.h",
-               "sys/times.h",
-               "sys/types.h",
-               "sys/ucontext.h",
-               "sys/uio.h",
-               "sys/un.h",
-               "sys/user.h",
-               "sys/utsname.h",
-               "sys/vfs.h",
-               "sys/xattr.h",
-               "sys/wait.h",
-               "syslog.h",
-               "termios.h",
-               "time.h",
-               "unistd.h",
-               "utime.h",
-               "utmp.h",
-               "wchar.h",
-               "xlocale.h",
-               // time64_t is not defined for 64-bit targets If included it will
-               // generate the error 'Your time_t is already 64-bit'
-               [target_pointer_width == 32]: "time64.h",
-               [x86]: "sys/reg.h",
-    }
+    headers!(
+        cfg,
+        "arpa/inet.h",
+        "ctype.h",
+        "dirent.h",
+        "dlfcn.h",
+        "elf.h",
+        "errno.h",
+        "fcntl.h",
+        "fnmatch.h",
+        "getopt.h",
+        "grp.h",
+        "ifaddrs.h",
+        "libgen.h",
+        "limits.h",
+        "link.h",
+        "linux/sysctl.h",
+        "locale.h",
+        "malloc.h",
+        "net/ethernet.h",
+        "net/if.h",
+        "net/if_arp.h",
+        "net/route.h",
+        "netdb.h",
+        "netinet/in.h",
+        "netinet/ip.h",
+        "netinet/tcp.h",
+        "netinet/udp.h",
+        "netpacket/packet.h",
+        "poll.h",
+        "pthread.h",
+        "pty.h",
+        "pwd.h",
+        "regex.h",
+        "resolv.h",
+        "sched.h",
+        "semaphore.h",
+        "signal.h",
+        "spawn.h",
+        "stddef.h",
+        "stdint.h",
+        "stdio.h",
+        "stdlib.h",
+        "string.h",
+        "sys/auxv.h",
+        "sys/epoll.h",
+        "sys/eventfd.h",
+        "sys/file.h",
+        "sys/fsuid.h",
+        "sys/inotify.h",
+        "sys/ioctl.h",
+        "sys/klog.h",
+        "sys/mman.h",
+        "sys/mount.h",
+        "sys/personality.h",
+        "sys/prctl.h",
+        "sys/ptrace.h",
+        "sys/random.h",
+        "sys/reboot.h",
+        "sys/resource.h",
+        "sys/sendfile.h",
+        "sys/signalfd.h",
+        "sys/socket.h",
+        "sys/stat.h",
+        "sys/statvfs.h",
+        "sys/swap.h",
+        "sys/syscall.h",
+        "sys/sysinfo.h",
+        "sys/system_properties.h",
+        "sys/time.h",
+        "sys/timerfd.h",
+        "sys/times.h",
+        "sys/types.h",
+        "sys/ucontext.h",
+        "sys/uio.h",
+        "sys/un.h",
+        "sys/user.h",
+        "sys/utsname.h",
+        "sys/vfs.h",
+        "sys/xattr.h",
+        "sys/wait.h",
+        "syslog.h",
+        "termios.h",
+        "time.h",
+        "unistd.h",
+        "utime.h",
+        "utmp.h",
+        "wchar.h",
+        "xlocale.h",
+        // time64_t is not defined for 64-bit targets If included it will
+        // generate the error 'Your time_t is already 64-bit'
+        (target_pointer_width == 32, "time64.h"),
+        (x86, "sys/reg.h"),
+    );
 
     // Include linux headers at the end:
-    headers! { cfg:
-                "asm/mman.h",
-                "linux/auxvec.h",
-                "linux/dccp.h",
-                "linux/elf.h",
-                "linux/errqueue.h",
-                "linux/falloc.h",
-                "linux/filter.h",
-                "linux/futex.h",
-                "linux/fs.h",
-                "linux/genetlink.h",
-                "linux/if_alg.h",
-                "linux/if_addr.h",
-                "linux/if_ether.h",
-                "linux/if_link.h",
-                "linux/rtnetlink.h",
-                "linux/if_tun.h",
-                "linux/kexec.h",
-                "linux/magic.h",
-                "linux/membarrier.h",
-                "linux/memfd.h",
-                "linux/mempolicy.h",
-                "linux/module.h",
-                "linux/mount.h",
-                "linux/net_tstamp.h",
-                "linux/netfilter/nfnetlink.h",
-                "linux/netfilter/nfnetlink_log.h",
-                "linux/netfilter/nfnetlink_queue.h",
-                "linux/netfilter/nf_tables.h",
-                "linux/netfilter_ipv4.h",
-                "linux/netfilter_ipv6.h",
-                "linux/netfilter_ipv6/ip6_tables.h",
-                "linux/netlink.h",
-                "linux/quota.h",
-                "linux/reboot.h",
-                "linux/seccomp.h",
-                "linux/sched.h",
-                "linux/sockios.h",
-                "linux/uinput.h",
-                "linux/vm_sockets.h",
-                "linux/wait.h",
-
-    }
+    headers!(
+        cfg,
+        "asm/mman.h",
+        "linux/auxvec.h",
+        "linux/dccp.h",
+        "linux/elf.h",
+        "linux/errqueue.h",
+        "linux/falloc.h",
+        "linux/filter.h",
+        "linux/futex.h",
+        "linux/fs.h",
+        "linux/genetlink.h",
+        "linux/if_alg.h",
+        "linux/if_addr.h",
+        "linux/if_ether.h",
+        "linux/if_link.h",
+        "linux/rtnetlink.h",
+        "linux/if_tun.h",
+        "linux/kexec.h",
+        "linux/magic.h",
+        "linux/membarrier.h",
+        "linux/memfd.h",
+        "linux/mempolicy.h",
+        "linux/module.h",
+        "linux/mount.h",
+        "linux/net_tstamp.h",
+        "linux/netfilter/nfnetlink.h",
+        "linux/netfilter/nfnetlink_log.h",
+        "linux/netfilter/nfnetlink_queue.h",
+        "linux/netfilter/nf_tables.h",
+        "linux/netfilter_arp.h",
+        "linux/netfilter_bridge.h",
+        "linux/netfilter_ipv4.h",
+        "linux/netfilter_ipv6.h",
+        "linux/netfilter_ipv6/ip6_tables.h",
+        "linux/netlink.h",
+        "linux/quota.h",
+        "linux/reboot.h",
+        "linux/seccomp.h",
+        "linux/sched.h",
+        "linux/sockios.h",
+        "linux/uinput.h",
+        "linux/vm_sockets.h",
+        "linux/wait.h",
+    );
 
     // Include Android-specific headers:
-    headers! { cfg:
-                "android/set_abort_message.h"
-    }
+    headers!(cfg, "android/set_abort_message.h",);
 
-    cfg.type_name(move |ty, is_struct, is_union| {
-        match ty {
-            // Just pass all these through, no need for a "struct" prefix
-            "FILE" | "fd_set" | "Dl_info" | "Elf32_Phdr" | "Elf64_Phdr" => ty.to_string(),
-
-            t if is_union => format!("union {}", t),
-
-            t if t.ends_with("_t") => t.to_string(),
-
-            // sigval is a struct in Rust, but a union in C:
-            "sigval" => format!("union sigval"),
-
-            // put `struct` in front of all structs:.
-            t if is_struct => format!("struct {}", t),
-
-            t => t.to_string(),
-        }
+    cfg.rename_type(move |ty| match ty {
+        "Ioctl" => Some("int".to_string()),
+        _ => None,
     });
 
-    cfg.field_name(move |struct_, field| {
-        match field {
+    cfg.rename_struct_ty(|ty| match ty {
+        // Just pass all these through, no need for a "struct" prefix
+        "FILE" | "fd_set" | "Dl_info" | "Elf32_Phdr" | "Elf64_Phdr" => Some(ty.to_string()),
+        // sigval is a struct in Rust, but a union in C:
+        "sigval" => Some("union sigval".to_string()),
+        t if t.ends_with("_t") => Some(t.to_string()),
+        _ => None,
+    });
+
+    cfg.rename_struct_field(move |struct_, field| {
+        match (struct_.ident(), field.ident()) {
             // Our stat *_nsec fields normally don't actually exist but are part
             // of a timeval struct
-            s if s.ends_with("_nsec") && struct_.starts_with("stat") => s.to_string(),
-            // FIXME: appears that `epoll_event.data` is an union
-            "u64" if struct_ == "epoll_event" => "data.u64".to_string(),
+            ("stat" | "statfs" | "statvfs" | "stat64" | "statfs64" | "statvfs64", f)
+                if f.ends_with("_nsec") =>
+            {
+                Some(f.to_string())
+            }
+            // FIXME(union): appears that `epoll_event.data` is an union
+            ("epoll_event", "u64") => Some("data.u64".to_string()),
             // The following structs have a field called `type` in C,
             // but `type` is a Rust keyword, so these fields are translated
             // to `type_` in Rust.
-            "type_"
-                if struct_ == "input_event"
-                    || struct_ == "input_mask"
-                    || struct_ == "ff_effect" =>
-            {
-                "type".to_string()
-            }
-
-            s => s.to_string(),
+            ("input_event" | "input_mask" | "ff_effect", "type_") => Some("type".to_string()),
+            _ => None,
         }
     });
 
-    cfg.skip_type(move |ty| {
-        match ty {
-            // FIXME: `sighandler_t` type is incorrect, see:
+    cfg.skip_alias(move |ty| {
+        match ty.ident() {
+            // FIXME(android): `sighandler_t` type is incorrect, see:
             // https://github.com/rust-lang/libc/issues/1359
             "sighandler_t" => true,
 
             // These are tested in the `linux_elf.rs` file.
             "Elf64_Phdr" | "Elf32_Phdr" => true,
+
             // These are intended to be opaque
             "posix_spawn_file_actions_t" => true,
             "posix_spawnattr_t" => true,
+
+            // Added in API level 24
+            "if_nameindex" => true,
+
             _ => false,
         }
     });
 
-    cfg.skip_struct(move |ty| {
-        if ty.starts_with("__c_anonymous_") {
-            return true;
-        }
-        match ty {
+    cfg.skip_struct(move |struct_| {
+        match struct_.ident() {
             // These are tested as part of the linux_fcntl tests since there are
             // header conflicts when including them with all the other structs.
             "termios2" => true,
@@ -1871,20 +2119,20 @@ fn test_android(target: &str) {
             // These are tested in the `linux_elf.rs` file.
             "Elf64_Phdr" | "Elf32_Phdr" => true,
 
-            // FIXME: The type of `iv` has been changed.
+            // FIXME(android): The type of `iv` has been changed.
             "af_alg_iv" => true,
 
-            // FIXME: The size of struct has been changed:
+            // FIXME(android): The size of struct has been changed:
             "inotify_event" => true,
-            // FIXME: The field has been changed:
+            // FIXME(android): The field has been changed:
             "sockaddr_vm" => true,
 
             _ => false,
         }
     });
 
-    cfg.skip_const(move |name| {
-        match name {
+    cfg.skip_const(move |constant| {
+        match constant.ident() {
             // The IPV6 constants are tested in the `linux_ipv6.rs` tests:
             | "IPV6_FLOWINFO"
             | "IPV6_FLOWLABEL_MGR"
@@ -1903,22 +2151,19 @@ fn test_android(target: &str) {
             // The `ARPHRD_CAN` is tested in the `linux_if_arp.rs` tests:
             "ARPHRD_CAN" => true,
 
-            // FIXME: deprecated: not available in any header
+            // FIXME(deprecated): deprecated: not available in any header
             // See: https://github.com/rust-lang/libc/issues/1356
             "ENOATTR" => true,
 
-            // FIXME: still necessary?
+            // FIXME(android): still necessary?
             "SIG_DFL" | "SIG_ERR" | "SIG_IGN" => true, // sighandler_t weirdness
-            // FIXME: deprecated - removed in glibc 2.26
+            // FIXME(deprecated): deprecated - removed in glibc 2.26
             "SIGUNUSED" => true,
 
             // Needs a newer Android SDK for the definition
             "P_PIDFD" => true,
 
-            // Requires Linux kernel 5.6
-            "VMADDR_CID_LOCAL" => true,
-
-            // FIXME: conflicts with standard C headers and is tested in
+            // FIXME(android): conflicts with standard C headers and is tested in
             // `linux_termios.rs` below:
             "BOTHER" => true,
             "IBSHIFT" => true,
@@ -1926,29 +2171,11 @@ fn test_android(target: &str) {
 
             // is a private value for kernel usage normally
             "FUSE_SUPER_MAGIC" => true,
-            // linux 5.12 min
-            "MPOL_F_NUMA_BALANCING" => true,
 
             // GRND_INSECURE was added in platform-tools-30.0.0
             "GRND_INSECURE" => true,
 
-            // kernel 5.10 minimum required
-            "MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED_RSEQ" | "MEMBARRIER_CMD_PRIVATE_EXPEDITED_RSEQ" => true,
-
-            // kernel 5.18 minimum
-            | "MADV_COLD"
-            | "MADV_DONTNEED_LOCKED"
-            | "MADV_PAGEOUT"
-            | "MADV_POPULATE_READ"
-            | "MADV_POPULATE_WRITE" => true,
-
-            // kernel 5.6 minimum required
-            "IPPROTO_MPTCP" | "IPPROTO_ETHERNET" => true,
-
-            // kernel 6.2 minimum
-            "TUN_F_USO4" | "TUN_F_USO6" | "IFF_NO_CARRIER" => true,
-
-            // FIXME: NDK r22 minimum required
+            // FIXME(android): NDK r22 minimum required
             | "FDB_NOTIFY_BIT"
             | "FDB_NOTIFY_INACTIVE_BIT"
             | "IFLA_ALT_IFNAME"
@@ -1961,16 +2188,16 @@ fn test_android(target: &str) {
             | "NFEA_DONT_REFRESH"
             | "NFEA_UNSPEC" => true,
 
-            // FIXME: NDK r23 minimum required
+            // FIXME(android): NDK r23 minimum required
             | "IFLA_PARENT_DEV_BUS_NAME"
             | "IFLA_PARENT_DEV_NAME" => true,
 
-            // FIXME: NDK r25 minimum required
+            // FIXME(android): NDK r25 minimum required
             | "IFLA_GRO_MAX_SIZE"
             | "NDA_FLAGS_EXT"
             | "NTF_EXT_MANAGED" => true,
 
-            // FIXME: NDK above r25 required
+            // FIXME(android): NDK above r25 required
             | "IFLA_ALLMULTI"
             | "IFLA_DEVLINK_PORT"
             | "IFLA_GRO_IPV4_MAX_SIZE"
@@ -1984,7 +2211,7 @@ fn test_android(target: &str) {
             | "NTF_EXT_LOCKED"
             | "ALG_SET_DRBG_ENTROPY" => true,
 
-            // FIXME: Something has been changed on r26b:
+            // FIXME(android): Something has been changed on r26b:
             | "IPPROTO_MAX"
             | "NFNL_SUBSYS_COUNT"
             | "NF_NETDEV_NUMHOOKS"
@@ -1992,10 +2219,10 @@ fn test_android(target: &str) {
             | "SW_MAX"
             | "SW_CNT" => true,
 
-            // FIXME: aarch64 env cannot find it:
+            // FIXME(android): aarch64 env cannot find it:
             | "PTRACE_GETREGS"
             | "PTRACE_SETREGS" if aarch64 => true,
-            // FIXME: The value has been changed on r26b:
+            // FIXME(android): The value has been changed on r26b:
             | "SYS_syscalls" if aarch64 => true,
 
             // From `<include/linux/sched.h>`.
@@ -2006,9 +2233,9 @@ fn test_android(target: &str) {
             | "PF_IO_WORKER"
             | "PF_WQ_WORKER"
             | "PF_FORKNOEXEC"
+            | "PF_MCE_PROCESS"
             | "PF_SUPERPRIV"
             | "PF_DUMPCORE"
-            | "PF_MCE_PROCESS"
             | "PF_SIGNALED"
             | "PF_MEMALLOC"
             | "PF_NPROC_EXCEEDED"
@@ -2024,17 +2251,27 @@ fn test_android(target: &str) {
             | "PF_NO_SETAFFINITY"
             | "PF_MCE_EARLY"
             | "PF_MEMALLOC_PIN"
+            | "PF_BLOCK_TS"
             | "PF_SUSPEND_TASK" => true,
+
+            // FIXME(android): Requires >= 6.12 kernel headers.
+            "SOF_TIMESTAMPING_OPT_RX_FILTER" => true,
+
+            // FIXME(android): Requires >= 6.9 kernel headers.
+            "AT_HWCAP3" | "AT_HWCAP4" => true,
 
             _ => false,
         }
     });
 
-    cfg.skip_fn(move |name| {
+    cfg.skip_fn(move |func| {
         // skip those that are manually verified
-        match name {
-            // FIXME: https://github.com/rust-lang/libc/issues/1272
-            "execv" | "execve" | "execvp" | "execvpe" | "fexecve" => true,
+        match func.ident() {
+            // FIXME(android): https://github.com/rust-lang/libc/issues/1272
+            "execv" | "execve" | "execvp" | "execvpe" => true,
+
+            // FIXME(android): for unknown reasons linker unable to find "fexecve"
+            "fexecve" => true,
 
             // There are two versions of the sterror_r function, see
             //
@@ -2056,7 +2293,7 @@ fn test_android(target: &str) {
             "__system_property_wait" => true,
 
             // Added in API level 30, but tests use level 28.
-            "mlock2" => true,
+            "memfd_create" | "mlock2" | "renameat2" | "statx" | "statx_timestamp" => true,
 
             // Added in glibc 2.25.
             "getentropy" => true,
@@ -2072,33 +2309,58 @@ fn test_android(target: &str) {
             // Added in API level 28, but some tests use level 24.
             "fread_unlocked" | "fwrite_unlocked" | "fgets_unlocked" | "fflush_unlocked" => true,
 
-            // FIXME: bad function pointers:
+            // Added in API level 28, but some tests use level 24.
+            "aligned_alloc" => true,
+
+            // Added in API level 26, but some tests use level 24.
+            "getgrent" => true,
+
+            // Added in API level 26, but some tests use level 24.
+            "setgrent" => true,
+
+            // Added in API level 26, but some tests use level 24.
+            "endgrent" => true,
+
+            // Added in API level 26, but some tests use level 24.
+            "getdomainname" | "setdomainname" => true,
+
+            // FIXME(android): bad function pointers:
             "isalnum" | "isalpha" | "iscntrl" | "isdigit" | "isgraph" | "islower" | "isprint"
             | "ispunct" | "isspace" | "isupper" | "isxdigit" | "isblank" | "tolower"
             | "toupper" => true,
+
+            // Added in API level 24
+            "if_nameindex" | "if_freenameindex" => true,
+
+            // FIXME(ctest): In our current method of testing, we cast the function to a `void *`,
+            // which is not possible for functions that have been overloaded.
+            "ioctl" => true,
 
             _ => false,
         }
     });
 
-    cfg.skip_field_type(move |struct_, field| {
-        // This is a weird union, don't check the type.
-        (struct_ == "ifaddrs" && field == "ifa_ifu") ||
-        // sigval is actually a union, but we pretend it's a struct
-        (struct_ == "sigevent" && field == "sigev_value") ||
-        // this one is an anonymous union
-        (struct_ == "ff_effect" && field == "u") ||
-        // FIXME: `sa_sigaction` has type `sighandler_t` but that type is
-        // incorrect, see: https://github.com/rust-lang/libc/issues/1359
-        (struct_ == "sigaction" && field == "sa_sigaction") ||
-        // signalfd had SIGSYS fields added in Android 4.19, but CI does not have that version yet.
-        (struct_ == "signalfd_siginfo" && field == "ssi_call_addr") ||
-        // FIXME: Seems the type has been changed on NDK r26b
-        (struct_ == "flock64" && (field == "l_start" || field == "l_len"))
+    cfg.skip_struct_field_type(move |struct_, field| {
+        match (struct_.ident(), field.ident()) {
+            // This is a weird union, don't check the type.
+            ("ifaddrs", "ifa_ifu") => true,
+            // sigval is actually a union, but we pretend it's a struct
+            ("sigevent", "sigev_value") => true,
+            // this one is an anonymous union
+            ("ff_effect", "u") => true,
+            // FIXME(android): `sa_sigaction` has type `sighandler_t` but that type is
+            // incorrect, see: https://github.com/rust-lang/libc/issues/1359
+            ("sigaction", "sa_sigaction") => true,
+            // signalfd had SIGSYS fields added in Android 4.19, but CI does not have that version yet.
+            ("signalfd_siginfo", "ssi_call_addr") => true,
+            // FIXME(android): Seems the type has been changed on NDK r26b
+            ("flock64", "l_start" | "l_len") => true,
+            _ => false,
+        }
     });
 
-    cfg.skip_field(|struct_, field| {
-        match (struct_, field) {
+    cfg.skip_struct_field(|struct_, field| {
+        match (struct_.ident(), field.ident()) {
             // conflicting with `p_type` macro from <resolve.h>.
             ("Elf32_Phdr", "p_type") => true,
             ("Elf64_Phdr", "p_type") => true,
@@ -2113,7 +2375,7 @@ fn test_android(target: &str) {
         }
     });
 
-    cfg.generate("../src/lib.rs", "main.rs");
+    ctest::generate_test(&mut cfg, "../src/lib.rs", "ctest_output.rs").unwrap();
 
     test_linux_like_apis(target);
 }
@@ -2122,7 +2384,21 @@ fn test_freebsd(target: &str) {
     assert!(target.contains("freebsd"));
     let mut cfg = ctest_cfg();
 
-    let freebsd_ver = which_freebsd();
+    let freebsd_ver = if let Ok(version) = env::var("RUST_LIBC_UNSTABLE_FREEBSD_VERSION") {
+        let vers = version.parse().unwrap();
+        println!("cargo:warning=setting FreeBSD version to {vers}");
+        Some(vers)
+    } else {
+        match &try_command_output("freebsd-version", &[]) {
+            Some(s) if s.starts_with("10") => Some(10),
+            Some(s) if s.starts_with("11") => Some(11),
+            Some(s) if s.starts_with("12") => Some(12),
+            Some(s) if s.starts_with("13") => Some(13),
+            Some(s) if s.starts_with("14") => Some(14),
+            Some(s) if s.starts_with("15") => Some(15),
+            Some(_) | None => None,
+        }
+    };
 
     match freebsd_ver {
         Some(12) => cfg.cfg("freebsd12", None),
@@ -2139,135 +2415,137 @@ fn test_freebsd(target: &str) {
     // Required for making freebsd11_stat available in the headers
     cfg.define("_WANT_FREEBSD11_STAT", None);
 
-    let freebsd13 = match freebsd_ver {
-        Some(n) if n >= 13 => true,
-        _ => false,
-    };
-    let freebsd14 = match freebsd_ver {
-        Some(n) if n >= 14 => true,
-        _ => false,
-    };
-    let freebsd15 = match freebsd_ver {
-        Some(n) if n >= 15 => true,
-        _ => false,
-    };
+    let freebsd13 = matches!(freebsd_ver, Some(n) if n >= 13);
+    let freebsd14 = matches!(freebsd_ver, Some(n) if n >= 14);
+    let freebsd15 = matches!(freebsd_ver, Some(n) if n >= 15);
 
-    headers! { cfg:
-                "aio.h",
-                "arpa/inet.h",
-                "bsm/audit.h",
-                "ctype.h",
-                "dirent.h",
-                "dlfcn.h",
-                "elf.h",
-                "errno.h",
-                "execinfo.h",
-                "fcntl.h",
-                "fnmatch.h",
-                "getopt.h",
-                "glob.h",
-                "grp.h",
-                "iconv.h",
-                "ifaddrs.h",
-                "kenv.h",
-                "langinfo.h",
-                "libgen.h",
-                "libutil.h",
-                "limits.h",
-                "link.h",
-                "locale.h",
-                "machine/elf.h",
-                "machine/reg.h",
-                "malloc_np.h",
-                "memstat.h",
-                "mqueue.h",
-                "net/bpf.h",
-                "net/if.h",
-                "net/if_arp.h",
-                "net/if_dl.h",
-                "net/if_mib.h",
-                "net/route.h",
-                "netdb.h",
-                "netinet/ip.h",
-                "netinet/in.h",
-                "netinet/sctp.h",
-                "netinet/tcp.h",
-                "netinet/udp.h",
-                "poll.h",
-                "pthread.h",
-                "pthread_np.h",
-                "pwd.h",
-                "regex.h",
-                "resolv.h",
-                "sched.h",
-                "semaphore.h",
-                "signal.h",
-                "spawn.h",
-                "stddef.h",
-                "stdint.h",
-                "stdio.h",
-                "stdlib.h",
-                "string.h",
-                "sys/capsicum.h",
-                "sys/auxv.h",
-                "sys/cpuset.h",
-                "sys/domainset.h",
-                "sys/eui64.h",
-                "sys/event.h",
-                [freebsd13]:"sys/eventfd.h",
-                "sys/extattr.h",
-                "sys/file.h",
-                "sys/ioctl.h",
-                "sys/ipc.h",
-                "sys/jail.h",
-                "sys/mman.h",
-                "sys/mount.h",
-                "sys/msg.h",
-                "sys/procctl.h",
-                "sys/procdesc.h",
-                "sys/ptrace.h",
-                "sys/queue.h",
-                "sys/random.h",
-                "sys/reboot.h",
-                "sys/resource.h",
-                "sys/rtprio.h",
-                "sys/sem.h",
-                "sys/shm.h",
-                "sys/socket.h",
-                "sys/stat.h",
-                "sys/statvfs.h",
-                "sys/sysctl.h",
-                "sys/thr.h",
-                "sys/time.h",
-                [freebsd14 || freebsd15]:"sys/timerfd.h",
-                "sys/times.h",
-                "sys/timex.h",
-                "sys/types.h",
-                "sys/proc.h",
-                "kvm.h", // must be after "sys/types.h"
-                "sys/ucontext.h",
-                "sys/uio.h",
-                "sys/ktrace.h",
-                "sys/umtx.h",
-                "sys/un.h",
-                "sys/user.h",
-                "sys/utsname.h",
-                "sys/uuid.h",
-                "sys/vmmeter.h",
-                "sys/wait.h",
-                "libprocstat.h",
-                "devstat.h",
-                "syslog.h",
-                "termios.h",
-                "time.h",
-                "ufs/ufs/quota.h",
-                "unistd.h",
-                "utime.h",
-                "utmpx.h",
-                "wchar.h",
-    }
+    headers!(
+        cfg,
+        "aio.h",
+        "arpa/inet.h",
+        "bsm/audit.h",
+        "ctype.h",
+        "dirent.h",
+        "dlfcn.h",
+        "elf.h",
+        "errno.h",
+        "execinfo.h",
+        "fcntl.h",
+        "fnmatch.h",
+        "getopt.h",
+        "glob.h",
+        "grp.h",
+        "iconv.h",
+        "ifaddrs.h",
+        "kenv.h",
+        "langinfo.h",
+        "libgen.h",
+        "libutil.h",
+        "limits.h",
+        "link.h",
+        "locale.h",
+        "machine/elf.h",
+        "machine/reg.h",
+        "malloc_np.h",
+        "memstat.h",
+        "mqueue.h",
+        "net/bpf.h",
+        "net/if.h",
+        "net/if_arp.h",
+        "net/if_dl.h",
+        "net/if_mib.h",
+        "net/route.h",
+        "netdb.h",
+        "netinet/ip.h",
+        "netinet/in.h",
+        "netinet/sctp.h",
+        "netinet/tcp.h",
+        "netinet/udp.h",
+        "poll.h",
+        "pthread.h",
+        "pthread_np.h",
+        "pwd.h",
+        "regex.h",
+        "resolv.h",
+        "sched.h",
+        "semaphore.h",
+        "signal.h",
+        "spawn.h",
+        "stddef.h",
+        "stdint.h",
+        "stdio.h",
+        "stdlib.h",
+        "string.h",
+        "sys/capsicum.h",
+        "sys/auxv.h",
+        "sys/cpuset.h",
+        "sys/domainset.h",
+        "sys/eui64.h",
+        "sys/event.h",
+        (freebsd13, "sys/eventfd.h"),
+        "sys/extattr.h",
+        "sys/file.h",
+        "sys/ioctl.h",
+        "sys/ipc.h",
+        "sys/jail.h",
+        "sys/mman.h",
+        "sys/mount.h",
+        "sys/msg.h",
+        "sys/procctl.h",
+        "sys/procdesc.h",
+        "sys/ptrace.h",
+        "sys/queue.h",
+        "sys/random.h",
+        "sys/reboot.h",
+        "sys/resource.h",
+        "sys/rtprio.h",
+        "sys/sem.h",
+        "sys/shm.h",
+        "sys/socket.h",
+        "sys/socketvar.h",
+        (freebsd15, "sys/ktls.h"),
+        "netinet/in_pcb.h", // must be after sys/socketvar.h, sys/ktls.h
+        "sys/stat.h",
+        "sys/statvfs.h",
+        "sys/sysctl.h",
+        "sys/thr.h",
+        "sys/time.h",
+        (freebsd14 || freebsd15, "sys/timerfd.h"),
+        (freebsd13 || freebsd14 || freebsd15, "dev/evdev/input.h"),
+        "sys/times.h",
+        "sys/timex.h",
+        "sys/types.h",
+        "sys/proc.h",
+        "kvm.h", // must be after "sys/types.h"
+        "sys/ucontext.h",
+        "sys/uio.h",
+        "sys/ktrace.h",
+        "sys/umtx.h",
+        "sys/un.h",
+        "sys/user.h",
+        "sys/utsname.h",
+        "sys/uuid.h",
+        "sys/vmmeter.h",
+        "sys/wait.h",
+        "libprocstat.h",
+        "devstat.h",
+        "syslog.h",
+        "termios.h",
+        "time.h",
+        "ufs/ufs/quota.h",
+        "unistd.h",
+        "utime.h",
+        "utmpx.h",
+        "wchar.h",
+    );
 
-    cfg.type_name(move |ty, is_struct, is_union| {
+    cfg.rename_type(|ty| match ty {
+        // FIXME(freebsd): https://github.com/rust-lang/libc/issues/1273
+        "sighandler_t" => Some("sig_t".to_string()),
+        _ => None,
+    });
+
+    cfg.rename_struct_ty(|ty| {
         match ty {
             // Just pass all these through, no need for a "struct" prefix
             "FILE"
@@ -2282,27 +2560,20 @@ fn test_freebsd(target: &str) {
             | "devstat_support_flags"
             | "devstat_type_flags"
             | "devstat_match_flags"
-            | "devstat_priority" => ty.to_string(),
-
-            // FIXME: https://github.com/rust-lang/libc/issues/1273
-            "sighandler_t" => "sig_t".to_string(),
-
-            t if is_union => format!("union {}", t),
-
-            t if t.ends_with("_t") => t.to_string(),
+            | "devstat_priority" => Some(ty.to_string()),
 
             // sigval is a struct in Rust, but a union in C:
-            "sigval" => format!("union sigval"),
+            "sigval" => Some("union sigval".to_string()),
 
-            // put `struct` in front of all structs:.
-            t if is_struct => format!("struct {}", t),
+            t if t.ends_with("_t") => Some(t.to_string()),
 
-            t => t.to_string(),
+            _ => None,
         }
     });
 
-    cfg.field_name(move |struct_, field| {
-        match field {
+    cfg.rename_struct_field(|struct_, field_| {
+        let struct_ = struct_.ident();
+        let replacement = match field_.ident() {
             // Our stat *_nsec fields normally don't actually exist but are part
             // of a timeval struct
             s if s.ends_with("_nsec") && struct_.starts_with("stat") => {
@@ -2313,12 +2584,16 @@ fn test_freebsd(target: &str) {
             "type_" if struct_ == "rtprio" => "type".to_string(),
             "type_" if struct_ == "sockstat" => "type".to_string(),
             "type_" if struct_ == "devstat_match_table" => "type".to_string(),
-            s => s.to_string(),
-        }
+            "type_" if struct_ == "input_event" => "type".to_string(),
+            // Field is named `gennum` in Rust because `gen` is a keyword
+            "gennum" if struct_ == "xktls_session_onedir" => "gen".to_string(),
+            _ => return None,
+        };
+        Some(replacement)
     });
 
-    cfg.skip_const(move |name| {
-        match name {
+    cfg.skip_const(move |constant| {
+        match constant.ident() {
             // These constants were introduced in FreeBSD 13:
             "F_ADD_SEALS" | "F_GET_SEALS" | "F_SEAL_SEAL" | "F_SEAL_SHRINK" | "F_SEAL_GROW"
             | "F_SEAL_WRITE"
@@ -2346,12 +2621,12 @@ fn test_freebsd(target: &str) {
                 true
             }
 
-            // FIXME: These are deprecated - remove in a couple of releases.
+            // FIXME(deprecated): These are deprecated - remove in a couple of releases.
             // These constants were removed in FreeBSD 11 (svn r273250) but will
             // still be accepted and ignored at runtime.
             "MAP_RENAME" | "MAP_NORESERVE" => true,
 
-            // FIXME: These are deprecated - remove in a couple of releases.
+            // FIXME(deprecated): These are deprecated - remove in a couple of releases.
             // These constants were removed in FreeBSD 11 (svn r262489),
             // and they've never had any legitimate use outside of the
             // base system anyway.
@@ -2369,7 +2644,7 @@ fn test_freebsd(target: &str) {
             "TDF_CANSWAP" | "TDF_SWAPINREQ" => true,
 
             // Unaccessible in FreeBSD 15
-            "TDI_SWAPPED" | "P_SWAPPINGOUT" | "P_SWAPPINGIN" => true,
+            "TDI_SWAPPED" | "P_SWAPPINGOUT" | "P_SWAPPINGIN" | "P_UNUSED3" => true,
 
             // Removed in FreeBSD 14 (git a6b55ee6be1)
             "IFF_KNOWSEPOCH" => true,
@@ -2377,7 +2652,7 @@ fn test_freebsd(target: &str) {
             // Removed in FreeBSD 14 (git 7ff9ae90f0b)
             "IFF_NOGROUP" => true,
 
-            // FIXME: These are deprecated - remove in a couple of releases.
+            // FIXME(deprecated): These are deprecated - remove in a couple of releases.
             // These symbols are not stable across OS-versions.  They were
             // changed for FreeBSD 14 in git revisions b62848b0c3f and
             // 2cf7870864e.
@@ -2437,7 +2712,7 @@ fn test_freebsd(target: &str) {
                 true
             }
 
-            // Added in in FreeBSD 13.0 (r367776 and r367287)
+            // Added in FreeBSD 13.0 (r367776 and r367287)
             "SCM_CREDS2" | "LOCAL_CREDS_PERSISTENT" if Some(13) > freebsd_ver => true,
 
             // Added in FreeBSD 14
@@ -2491,7 +2766,7 @@ fn test_freebsd(target: &str) {
             }
 
             // Added in FreeBSD 14.
-            "F_KINFO" => true, // FIXME: depends how frequent freebsd 14 is updated on CI, this addition went this week only.
+            "F_KINFO" => true, // FIXME(freebsd): depends how frequent freebsd 14 is updated on CI, this addition went this week only.
             "SHM_RENAME_NOREPLACE"
             | "SHM_RENAME_EXCHANGE"
             | "SHM_LARGEPAGE_ALLOC_DEFAULT"
@@ -2547,11 +2822,11 @@ fn test_freebsd(target: &str) {
             // Added in FreeBSD 14
             "IFCAP_NV" if Some(14) > freebsd_ver => true,
 
-            // FIXME: Removed in https://reviews.freebsd.org/D38574 and https://reviews.freebsd.org/D38822
+            // FIXME(freebsd): Removed in https://reviews.freebsd.org/D38574 and https://reviews.freebsd.org/D38822
             // We maybe should deprecate them once a stable release ships them.
             "IP_BINDMULTI" | "IP_RSS_LISTEN_BUCKET" => true,
 
-            // FIXME: Removed in https://reviews.freebsd.org/D39127.
+            // FIXME(freebsd): Removed in https://reviews.freebsd.org/D39127.
             "KERN_VNODE" => true,
 
             // Added in FreeBSD 14
@@ -2567,18 +2842,45 @@ fn test_freebsd(target: &str) {
                 true
             }
 
-            // FIXME: Removed in FreeBSD 15:
+            // Added in FreeBSD 14.1
+            "KCMP_FILE" | "KCMP_FILEOBJ" | "KCMP_FILES" | "KCMP_SIGHAND" | "KCMP_VM"
+                if Some(14) > freebsd_ver =>
+            {
+                true
+            }
+
+            // FIXME(freebsd): Removed in FreeBSD 15:
             "LOCAL_CONNWAIT" if freebsd_ver >= Some(15) => true,
 
-            // FIXME: The values has been changed in FreeBSD 15:
+            // FIXME(freebsd): The values has been changed in FreeBSD 15:
             "CLOCK_BOOTTIME" if Some(15) <= freebsd_ver => true,
+
+            // Added in FreeBSD 14.0
+            "TCP_FUNCTION_ALIAS" if Some(14) > freebsd_ver => true,
+
+            // These constants may change or disappear in future OS releases, and they probably
+            // have no legitimate use in applications anyway.
+            "CAP_UNUSED0_44" | "CAP_UNUSED0_57" | "CAP_UNUSED1_22" | "CAP_UNUSED1_57"
+            | "CAP_ALL0" | "CAP_ALL1" => true,
+
+            // FIXME(freebsd): Removed in FreeBSD 15, deprecated in libc
+            "TCP_PCAP_OUT" | "TCP_PCAP_IN" => true,
+
+            // Added in FreeBSD 14.2
+            "SO_SPLICE" if Some(14) > freebsd_ver => true,
+
+            // FIXME(deprecated): deprecated in 0.2, removed in main
+            "TIOCMGDTRWAIT" | "TIOCMSDTRWAIT" => true,
+
+            // Added in FreeBSD 15
+            "AT_HWCAP3" | "AT_HWCAP4" if Some(15) > freebsd_ver => true,
 
             _ => false,
         }
     });
 
-    cfg.skip_type(move |ty| {
-        match ty {
+    cfg.skip_alias(move |ty| {
+        match ty.ident() {
             // the struct "__kvm" is quite tricky to bind so since we only use a pointer to it
             // for now, it doesn't matter too much...
             "kvm_t" => true,
@@ -2589,11 +2891,8 @@ fn test_freebsd(target: &str) {
         }
     });
 
-    cfg.skip_struct(move |ty| {
-        if ty.starts_with("__c_anonymous_") {
-            return true;
-        }
-        match ty {
+    cfg.skip_struct(move |struct_| {
+        match struct_.ident() {
             // `procstat` is a private struct
             "procstat" => true,
 
@@ -2621,16 +2920,22 @@ fn test_freebsd(target: &str) {
             | "sctp_send_failed_event"
             | "sctp_stream_reset_event" => true,
 
-            // FIXME: Changed in FreeBSD 15
+            // FIXME(freebsd): Changed in FreeBSD 15
             "tcp_info" | "sockstat" if Some(15) >= freebsd_ver => true,
+
+            // `splice` introduced in FreeBSD 14.2
+            "splice" if Some(14) > freebsd_ver => true,
+
+            // Those are introduced in FreeBSD 15.
+            "xktls_session_onedir" | "xktls_session" if Some(15) > freebsd_ver => true,
 
             _ => false,
         }
     });
 
-    cfg.skip_fn(move |name| {
+    cfg.skip_fn(move |func| {
         // skip those that are manually verified
-        match name {
+        match func.ident() {
             // FIXME: https://github.com/rust-lang/libc/issues/1272
             // Also, `execvpe` is introduced in FreeBSD 14.1
             "execv" | "execve" | "execvp" | "execvpe" | "fexecve" => true,
@@ -2640,7 +2945,7 @@ fn test_freebsd(target: &str) {
             // Therefore the function pointer comparison does not make sense for it.
             "uname" => true,
 
-            // FIXME: Our API is unsound. The Rust API allows aliasing
+            // FIXME(ctest): Our API is unsound. The Rust API allows aliasing
             // pointers, but the C API requires pointers not to alias.
             // We should probably be at least using `&`/`&mut` here, see:
             // https://github.com/gnzlbg/ctest/issues/68
@@ -2684,23 +2989,20 @@ fn test_freebsd(target: &str) {
                 true
             }
 
+            // Those are introduced in FreeBSD 14.1.
+            "kcmp" => true,
+
             _ => false,
         }
     });
 
-    cfg.volatile_item(|i| {
-        use ctest::VolatileItemKind::*;
-        match i {
-            // aio_buf is a volatile void** but since we cannot express that in
-            // Rust types, we have to explicitly tell the checker about it here:
-            StructField(ref n, ref f) if n == "aiocb" && f == "aio_buf" => true,
-            _ => false,
-        }
-    });
+    // aio_buf is a volatile void* but since we cannot express that in
+    // Rust types, we have to explicitly tell the checker about it here:
+    cfg.volatile_struct_field(|s, f| s.ident() == "aiocb" && f.ident() == "aio_buf");
 
-    cfg.skip_field(move |struct_, field| {
-        match (struct_, field) {
-            // FIXME: `sa_sigaction` has type `sighandler_t` but that type is
+    cfg.skip_struct_field(move |struct_, field| {
+        match (struct_.ident(), field.ident()) {
+            // FIXME(freebsd): `sa_sigaction` has type `sighandler_t` but that type is
             // incorrect, see: https://github.com/rust-lang/libc/issues/1359
             ("sigaction", "sa_sigaction") => true,
 
@@ -2731,7 +3033,7 @@ fn test_freebsd(target: &str) {
             // anonymous struct
             ("devstat", "dev_links") => true,
 
-            // FIXME: structs too complicated to bind for now...
+            // FIXME(freebsd): structs too complicated to bind for now...
             ("kinfo_proc", "ki_paddr") => true,
             ("kinfo_proc", "ki_addr") => true,
             ("kinfo_proc", "ki_tracep") => true,
@@ -2760,6 +3062,8 @@ fn test_freebsd(target: &str) {
             // `tcp_snd_wscale` and `tcp_rcv_wscale` are bitfields
             ("tcp_info", "tcp_snd_wscale") => true,
             ("tcp_info", "tcp_rcv_wscale") => true,
+            // mc_spare can change in size between OS releases.  It's a spare field, after all.
+            ("__mcontext", "mc_spare") => true,
 
             _ => false,
         }
@@ -2772,225 +3076,223 @@ fn test_freebsd(target: &str) {
         });
     }
 
-    cfg.generate("../src/lib.rs", "main.rs");
+    // FIXME(ctest): The original ctest bypassed this requirement somehow.
+    cfg.rename_type(move |ty| (ty == "dot3Vendors").then_some(format!("enum {ty}")));
+
+    ctest::generate_test(&mut cfg, "../src/lib.rs", "ctest_output.rs").unwrap();
 }
 
 fn test_emscripten(target: &str) {
     assert!(target.contains("emscripten"));
 
     let mut cfg = ctest_cfg();
-    cfg.define("_GNU_SOURCE", None); // FIXME: ??
+    cfg.define("_GNU_SOURCE", None); // FIXME(emscripten): ??
 
-    headers! { cfg:
-               "aio.h",
-               "ctype.h",
-               "dirent.h",
-               "dlfcn.h",
-               "errno.h",
-               "fcntl.h",
-               "fnmatch.h",
-               "glob.h",
-               "grp.h",
-               "ifaddrs.h",
-               "langinfo.h",
-               "limits.h",
-               "locale.h",
-               "malloc.h",
-               "mntent.h",
-               "mqueue.h",
-               "net/ethernet.h",
-               "net/if.h",
-               "net/if_arp.h",
-               "net/route.h",
-               "netdb.h",
-               "netinet/in.h",
-               "netinet/ip.h",
-               "netinet/tcp.h",
-               "netinet/udp.h",
-               "netpacket/packet.h",
-               "poll.h",
-               "pthread.h",
-               "pty.h",
-               "pwd.h",
-               "resolv.h",
-               "sched.h",
-               "sched.h",
-               "semaphore.h",
-               "shadow.h",
-               "signal.h",
-               "stddef.h",
-               "stdint.h",
-               "stdio.h",
-               "stdlib.h",
-               "string.h",
-               "sys/epoll.h",
-               "sys/eventfd.h",
-               "sys/file.h",
-               "sys/ioctl.h",
-               "sys/ipc.h",
-               "sys/mman.h",
-               "sys/mount.h",
-               "sys/msg.h",
-               "sys/personality.h",
-               "sys/prctl.h",
-               "sys/ptrace.h",
-               "sys/quota.h",
-               "sys/reboot.h",
-               "sys/resource.h",
-               "sys/sem.h",
-               "sys/shm.h",
-               "sys/signalfd.h",
-               "sys/socket.h",
-               "sys/stat.h",
-               "sys/statvfs.h",
-               "sys/swap.h",
-               "sys/syscall.h",
-               "sys/sysctl.h",
-               "sys/sysinfo.h",
-               "sys/time.h",
-               "sys/timerfd.h",
-               "sys/times.h",
-               "sys/types.h",
-               "sys/uio.h",
-               "sys/un.h",
-               "sys/user.h",
-               "sys/utsname.h",
-               "sys/vfs.h",
-               "sys/wait.h",
-               "sys/xattr.h",
-               "syslog.h",
-               "termios.h",
-               "time.h",
-               "ucontext.h",
-               "unistd.h",
-               "utime.h",
-               "utmp.h",
-               "utmpx.h",
-               "wchar.h",
-    }
+    headers!(
+        cfg,
+        "ctype.h",
+        "dirent.h",
+        "dlfcn.h",
+        "errno.h",
+        "fcntl.h",
+        "fnmatch.h",
+        "glob.h",
+        "grp.h",
+        "ifaddrs.h",
+        "langinfo.h",
+        "limits.h",
+        "locale.h",
+        "malloc.h",
+        "mntent.h",
+        "mqueue.h",
+        "net/ethernet.h",
+        "net/if.h",
+        "net/if_arp.h",
+        "net/route.h",
+        "netdb.h",
+        "netinet/in.h",
+        "netinet/ip.h",
+        "netinet/tcp.h",
+        "netinet/udp.h",
+        "netpacket/packet.h",
+        "poll.h",
+        "pthread.h",
+        "pty.h",
+        "pwd.h",
+        "resolv.h",
+        "sched.h",
+        "sched.h",
+        "semaphore.h",
+        "shadow.h",
+        "signal.h",
+        "stddef.h",
+        "stdint.h",
+        "stdio.h",
+        "stdlib.h",
+        "string.h",
+        "sys/file.h",
+        "sys/ioctl.h",
+        "sys/ipc.h",
+        "sys/mman.h",
+        "sys/mount.h",
+        "sys/msg.h",
+        "sys/resource.h",
+        "sys/sem.h",
+        "sys/shm.h",
+        "sys/socket.h",
+        "sys/stat.h",
+        "sys/statvfs.h",
+        "sys/syscall.h",
+        "sys/sysinfo.h",
+        "sys/time.h",
+        "sys/times.h",
+        "sys/types.h",
+        "sys/uio.h",
+        "sys/un.h",
+        "sys/user.h",
+        "sys/utsname.h",
+        "sys/vfs.h",
+        "sys/wait.h",
+        "sys/xattr.h",
+        "syslog.h",
+        "termios.h",
+        "time.h",
+        "ucontext.h",
+        "unistd.h",
+        "utime.h",
+        "utmp.h",
+        "utmpx.h",
+        "wchar.h",
+    );
 
-    cfg.type_name(move |ty, is_struct, is_union| {
+    cfg.rename_struct_ty(move |ty| {
         match ty {
             // Just pass all these through, no need for a "struct" prefix
-            "FILE" | "fd_set" | "Dl_info" | "DIR" => ty.to_string(),
+            "FILE" | "fd_set" | "Dl_info" | "DIR" => Some(ty.to_string()),
 
-            "os_unfair_lock" => "struct os_unfair_lock_s".to_string(),
-
-            // LFS64 types have been removed in Emscripten 3.1.44+
+            // LFS64 types have been removed in Emscripten 3.1.44
             // https://github.com/emscripten-core/emscripten/pull/19812
-            "off64_t" => "off_t".to_string(),
+            "off64_t" => Some("off_t".to_string()),
 
             // typedefs don't need any keywords
-            t if t.ends_with("_t") => t.to_string(),
-
-            // put `struct` in front of all structs:.
-            t if is_struct => format!("struct {}", t),
-
-            // put `union` in front of all unions:
-            t if is_union => format!("union {}", t),
-
-            t => t.to_string(),
+            t if t.ends_with("_t") => Some(t.to_string()),
+            _ => None,
         }
     });
 
-    cfg.field_name(move |struct_, field| {
-        match field {
+    cfg.rename_struct_field(move |struct_, field| {
+        match field.ident() {
             // Our stat *_nsec fields normally don't actually exist but are part
             // of a timeval struct
-            s if s.ends_with("_nsec") && struct_.starts_with("stat") => {
-                s.replace("e_nsec", ".tv_nsec")
+            s if s.ends_with("_nsec") && struct_.ident().starts_with("stat") => {
+                Some(s.replace("e_nsec", ".tv_nsec"))
             }
-            // FIXME: appears that `epoll_event.data` is an union
-            "u64" if struct_ == "epoll_event" => "data.u64".to_string(),
-            s => s.to_string(),
+            // Rust struct uses raw u64, rather than union
+            "u64" if struct_.ident() == "epoll_event" => Some("data.u64".to_string()),
+            _ => None,
         }
     });
 
-    cfg.skip_type(move |ty| {
-        match ty {
+    cfg.skip_alias(move |ty| {
+        match ty.ident() {
             // sighandler_t is crazy across platforms
-            // FIXME: is this necessary?
+            // FIXME(emscripten): is this necessary?
             "sighandler_t" => true,
 
-            // FIXME: The size has been changed due to musl's time64
-            "time_t" => true,
-
-            // LFS64 types have been removed in Emscripten 3.1.44+
+            // LFS64 types have been removed in Emscripten 3.1.44
             // https://github.com/emscripten-core/emscripten/pull/19812
             t => t.ends_with("64") || t.ends_with("64_t"),
         }
     });
 
-    cfg.skip_struct(move |ty| {
-        match ty {
-            // This is actually a union, not a struct
-            // FIXME: is this necessary?
-            "sigval" => true,
-
-            // FIXME: It was removed in
-            // emscripten-core/emscripten@953e414
-            "pthread_mutexattr_t" => true,
-
-            // FIXME: Investigate why the test fails.
-            // Skip for now to unblock CI.
-            "pthread_condattr_t" => true,
-
-            // FIXME: The size has been changed when upgraded to musl 1.2.2
-            "pthread_mutex_t" => true,
-
-            // FIXME: Lowered from 16 to 8 bytes in
-            // llvm/llvm-project@d1a96e9
-            "max_align_t" => true,
-
-            // FIXME: The size has been changed due to time64
-            "utimbuf" | "timeval" | "timespec" | "rusage" | "itimerval" | "sched_param"
-            | "stat" | "stat64" | "shmid_ds" | "msqid_ds" => true,
-
-            // LFS64 types have been removed in Emscripten 3.1.44+
-            // https://github.com/emscripten-core/emscripten/pull/19812
-            ty => ty.ends_with("64") || ty.ends_with("64_t"),
-        }
-    });
-
-    cfg.skip_fn(move |name| {
-        match name {
-            // Emscripten does not support fork/exec/wait or any kind of multi-process support
-            // https://github.com/emscripten-core/emscripten/blob/3.1.30/tools/system_libs.py#L973
-            "execv" | "execve" | "execvp" | "execvpe" | "fexecve" | "wait4" => true,
-
-            // FIXME: Remove after emscripten-core/emscripten#18492 is released (> 3.1.30).
-            "clearenv" => true,
+    cfg.skip_union(|union_| {
+        match union_.ident() {
+            // No epoll support
+            // https://github.com/emscripten-core/emscripten/issues/5033
+            ty if ty.starts_with("epoll") => true,
 
             _ => false,
         }
     });
 
-    cfg.skip_const(move |name| {
-        match name {
-            // FIXME: deprecated - SIGNUNUSED was removed in glibc 2.26
+    cfg.skip_alias(|ty| {
+        match ty.ident() {
+            // LFS64 types have been removed in Emscripten 3.1.44
+            // https://github.com/emscripten-core/emscripten/pull/19812
+            ty => ty.ends_with("64") || ty.ends_with("64_t"),
+        }
+    });
+
+    cfg.skip_struct(move |struct_| {
+        match struct_.ident() {
+            // This is actually a union, not a struct
+            "sigval" => true,
+
+            // FIXME(emscripten): Investigate why the test fails.
+            // Skip for now to unblock CI.
+            "pthread_condattr_t" => true,
+            "pthread_mutexattr_t" => true,
+
+            // No epoll support
+            // https://github.com/emscripten-core/emscripten/issues/5033
+            ty if ty.starts_with("epoll") => true,
+
+            ty if ty.starts_with("signalfd") => true,
+            _ => false,
+        }
+    });
+
+    cfg.skip_fn(move |func| {
+        match func.ident() {
+            // Emscripten does not support fork/exec/wait or any kind of multi-process support
+            // https://github.com/emscripten-core/emscripten/blob/3.1.68/tools/system_libs.py#L1100
+            "execv" | "execve" | "execvp" | "execvpe" | "fexecve" | "wait4" => true,
+
+            _ => false,
+        }
+    });
+
+    cfg.skip_const(move |constant| {
+        match constant.ident() {
+            // FIXME(deprecated): deprecated - SIGNUNUSED was removed in glibc 2.26
             // users should use SIGSYS instead
             "SIGUNUSED" => true,
 
-            // FIXME: emscripten uses different constants to constructs these
+            // FIXME(emscripten): emscripten uses different constants to constructs these
             n if n.contains("__SIZEOF_PTHREAD") => true,
 
-            // FIXME: `SYS_gettid` was removed in
-            // emscripten-core/emscripten@6d6474e
+            // No epoll support
+            // https://github.com/emscripten-core/emscripten/issues/5033
+            n if n.starts_with("EPOLL") => true,
+
+            // No ptrace.h
+            // https://github.com/emscripten-core/emscripten/pull/17704
+            n if n.starts_with("PTRACE_") => true,
+
+            // No quota.h
+            // https://github.com/emscripten-core/emscripten/pull/17704
+            n if n.starts_with("QIF_") => true,
+            "USRQUOTA" | "GRPQUOTA" | "Q_GETFMT" | "Q_GETINFO" | "Q_SETINFO" | "Q_SYNC"
+            | "Q_QUOTAON" | "Q_QUOTAOFF" | "Q_GETQUOTA" | "Q_SETQUOTA" => true,
+
+            // `SYS_gettid` was removed in Emscripten v1.39.9
+            // https://github.com/emscripten-core/emscripten/pull/10439
             "SYS_gettid" => true,
 
-            // FIXME: These values have been changed
-            | "POSIX_MADV_DONTNEED" // to 4
-            | "RLIMIT_NLIMITS" // to 16
-            | "RLIM_NLIMITS" // to 16
-            | "IPPROTO_MAX" // to 263
-            | "F_GETLK" // to 5
-            | "F_SETLK" // to 6
-            | "F_SETLKW" // to 7
-            | "O_TMPFILE" // to 65
-            | "SIG_IGN" // -1
-                => true,
+            // No personality.h
+            // https://github.com/emscripten-core/emscripten/pull/17704
+            "ADDR_NO_RANDOMIZE" | "MMAP_PAGE_ZERO" | "ADDR_COMPAT_LAYOUT" | "READ_IMPLIES_EXEC"
+            | "ADDR_LIMIT_32BIT" | "SHORT_INODE" | "WHOLE_SECONDS" | "STICKY_TIMEOUTS"
+            | "ADDR_LIMIT_3GB" => true,
 
-            // LFS64 types have been removed in Emscripten 3.1.44+
+            // `SIG_IGN` has been changed to -2 since 1 is a valid function address
+            // https://github.com/emscripten-core/emscripten/pull/14883
+            "SIG_IGN" => true,
+
+            // Constants present in other linuxes but not emscripten
+            "SI_DETHREAD" | "TRAP_PERF" => true,
+
+            // LFS64 types have been removed in Emscripten 3.1.44
             // https://github.com/emscripten-core/emscripten/pull/19812
             n if n.starts_with("RLIM64") => true,
 
@@ -2998,60 +3300,63 @@ fn test_emscripten(target: &str) {
         }
     });
 
-    cfg.skip_field_type(move |struct_, field| {
-        // This is a weird union, don't check the type.
-        // FIXME: is this necessary?
-        (struct_ == "ifaddrs" && field == "ifa_ifu") ||
-        // sighandler_t type is super weird
-        // FIXME: is this necessary?
-        (struct_ == "sigaction" && field == "sa_sigaction") ||
-        // sigval is actually a union, but we pretend it's a struct
-        // FIXME: is this necessary?
-        (struct_ == "sigevent" && field == "sigev_value") ||
-        // aio_buf is "volatile void*" and Rust doesn't understand volatile
-        // FIXME: is this necessary?
-        (struct_ == "aiocb" && field == "aio_buf")
+    cfg.skip_struct_field_type(move |struct_, field| {
+        match (struct_.ident(), field.ident()) {
+            // This is a weird union, don't check the type.
+            ("ifaddrs", "ifa_ifu") => true,
+            // sighandler_t type is super weird
+            ("sigaction", "sa_sigaction") => true,
+            // sigval is actually a union, but we pretend it's a struct
+            ("sigevent", "sigev_value") => true,
+            _ => false,
+        }
     });
 
-    cfg.skip_field(move |struct_, field| {
-        // this is actually a union on linux, so we can't represent it well and
-        // just insert some padding.
-        // FIXME: is this necessary?
-        (struct_ == "siginfo_t" && field == "_pad") ||
-        // musl names this __dummy1 but it's still there
-        // FIXME: is this necessary?
-        (struct_ == "glob_t" && field == "gl_flags") ||
-        // musl seems to define this as an *anonymous* bitfield
-        // FIXME: is this necessary?
-        (struct_ == "statvfs" && field == "__f_unused") ||
-        // sigev_notify_thread_id is actually part of a sigev_un union
-        (struct_ == "sigevent" && field == "sigev_notify_thread_id") ||
-        // signalfd had SIGSYS fields added in Linux 4.18, but no libc release has them yet.
-        (struct_ == "signalfd_siginfo" && (field == "ssi_addr_lsb" ||
-                                           field == "_pad2" ||
-                                           field == "ssi_syscall" ||
-                                           field == "ssi_call_addr" ||
-                                           field == "ssi_arch")) ||
-        // FIXME: After musl 1.1.24, it have only one field `sched_priority`,
-        // while other fields become reserved.
-        (struct_ == "sched_param" && [
-            "sched_ss_low_priority",
-            "sched_ss_repl_period",
-            "sched_ss_init_budget",
-            "sched_ss_max_repl",
-        ].contains(&field))
+    cfg.skip_struct_field(move |struct_, field| {
+        match (struct_.ident(), field.ident()) {
+            // this is actually a union on linux, so we can't represent it well and
+            // just insert some padding.
+            ("siginfo_t", "_pad") => true,
+            // musl names this __dummy1 but it's still there
+            ("glob_t", "gl_flags") => true,
+            // FIXME(emscripten): After musl 1.1.24, it have only one field `sched_priority`,
+            // while other fields become reserved.
+            (
+                "sched_param",
+                "sched_ss_low_priority"
+                | "sched_ss_repl_period"
+                | "sched_ss_init_budget"
+                | "sched_ss_max_repl",
+            ) => true,
+            _ => false,
+        }
     });
 
-    // FIXME: test linux like
-    cfg.generate("../src/lib.rs", "main.rs");
+    ctest::generate_test(&mut cfg, "../src/lib.rs", "ctest_output.rs").unwrap();
 }
 
 fn test_neutrino(target: &str) {
     assert!(target.contains("nto-qnx"));
 
     let mut cfg = ctest_cfg();
+    if target.ends_with("_iosock") {
+        let qnx_target_val = env::var("QNX_TARGET")
+            .unwrap_or_else(|_| "QNX_TARGET_not_set_please_source_qnxsdp".into());
 
-    headers! { cfg:
+        cfg.include(qnx_target_val + "/usr/include/io-sock");
+        headers!(
+            cfg,
+            "io-sock.h",
+            "sys/types.h",
+            "sys/socket.h",
+            "sys/sysctl.h",
+            "net/if.h",
+            "net/if_arp.h",
+        );
+    }
+
+    headers!(
+        cfg,
         "ctype.h",
         "dirent.h",
         "dlfcn.h",
@@ -3134,12 +3439,11 @@ fn test_neutrino(target: &str) {
         "net/bpf.h",
         "net/if_dl.h",
         "sys/syspage.h",
-
         // TODO: The following header file doesn't appear as part of the default headers
         //       found in a standard installation of Neutrino 7.1 SDP.  The structures/
         //       functions dependent on it are currently commented out.
         //"sys/asyncmsg.h",
-    }
+    );
 
     // Create and include a header file containing
     // items which are not included in any official
@@ -3157,50 +3461,41 @@ fn test_neutrino(target: &str) {
     )
     .unwrap();
 
-    cfg.type_name(move |ty, is_struct, is_union| {
+    cfg.rename_struct_ty(move |ty| {
         match ty {
             // Just pass all these through, no need for a "struct" prefix
             "FILE" | "fd_set" | "Dl_info" | "DIR" | "Elf32_Phdr" | "Elf64_Phdr" | "Elf32_Shdr"
             | "Elf64_Shdr" | "Elf32_Sym" | "Elf64_Sym" | "Elf32_Ehdr" | "Elf64_Ehdr"
             | "Elf32_Chdr" | "Elf64_Chdr" | "aarch64_qreg_t" | "syspage_entry_info"
-            | "syspage_array_info" => ty.to_string(),
+            | "syspage_array_info" => Some(ty.to_string()),
 
-            "Ioctl" => "int".to_string(),
-
-            t if is_union => format!("union {}", t),
-
-            t if t.ends_with("_t") => t.to_string(),
-
-            // put `struct` in front of all structs:.
-            t if is_struct => format!("struct {}", t),
-
-            t => t.to_string(),
+            t if t.ends_with("_t") => Some(t.to_string()),
+            _ => None,
         }
     });
 
-    cfg.field_name(move |_struct_, field| match field {
-        "type_" => "type".to_string(),
-
-        s => s.to_string(),
+    cfg.rename_type(|ty| match ty {
+        "Ioctl" => Some("int".to_string()),
+        _ => None,
     });
 
-    cfg.volatile_item(|i| {
-        use ctest::VolatileItemKind::*;
-        match i {
-            // The following fields are volatie but since we cannot express that in
-            // Rust types, we have to explicitly tell the checker about it here:
-            StructField(ref n, ref f) if n == "aiocb" && f == "aio_buf" => true,
-            StructField(ref n, ref f) if n == "qtime_entry" && f == "nsec_tod_adjust" => true,
-            StructField(ref n, ref f) if n == "qtime_entry" && f == "nsec" => true,
-            StructField(ref n, ref f) if n == "qtime_entry" && f == "nsec_stable" => true,
-            StructField(ref n, ref f) if n == "intrspin" && f == "value" => true,
-            _ => false,
-        }
+    cfg.rename_struct_field(move |_struct_, field| match field.ident() {
+        "type_" => Some("type".to_string()),
+        _ => None,
     });
 
-    cfg.skip_type(move |ty| {
-        match ty {
-            // FIXME: `sighandler_t` type is incorrect, see:
+    cfg.volatile_struct_field(|s, f| match (s.ident(), f.ident()) {
+        ("aiocb", "aio_buf") => true,
+        ("qtime_entry", "nsec_tod_adjust") => true,
+        ("qtime_entry", "nsec") => true,
+        ("qtime_entry", "nsec_stable") => true,
+        ("intrspin", "value") => true,
+        _ => false,
+    });
+
+    cfg.skip_alias(move |ty| {
+        match ty.ident() {
+            // FIXME(sighandler): `sighandler_t` type is incorrect, see:
             // https://github.com/rust-lang/libc/issues/1359
             "sighandler_t" => true,
 
@@ -3211,14 +3506,11 @@ fn test_neutrino(target: &str) {
         }
     });
 
-    cfg.skip_struct(move |ty| {
-        if ty.starts_with("__c_anonymous_") {
-            return true;
-        }
-        match ty {
+    cfg.skip_struct(move |struct_| {
+        match struct_.ident() {
             "Elf64_Phdr" | "Elf32_Phdr" => true,
 
-            // FIXME: This is actually a union, not a struct
+            // FIXME(union): This is actually a union, not a struct
             "sigval" => true,
 
             // union
@@ -3228,8 +3520,8 @@ fn test_neutrino(target: &str) {
         }
     });
 
-    cfg.skip_const(move |name| {
-        match name {
+    cfg.skip_const(move |constant| {
+        match constant.ident() {
             // These signal "functions" are actually integer values that are casted to a fn ptr
             // This causes the compiler to err because of "illegal cast of int to ptr".
             "SIG_DFL" => true,
@@ -3240,9 +3532,9 @@ fn test_neutrino(target: &str) {
         }
     });
 
-    cfg.skip_fn(move |name| {
+    cfg.skip_fn(move |func| {
         // skip those that are manually verified
-        match name {
+        match func.ident() {
             // FIXME: https://github.com/rust-lang/libc/issues/1272
             "execv" | "execve" | "execvp" | "execvpe" => true,
 
@@ -3252,7 +3544,7 @@ fn test_neutrino(target: &str) {
             // wrong signature of callback ptr
             "__cxa_atexit" => true,
 
-            // FIXME: Our API is unsound. The Rust API allows aliasing
+            // FIXME(ctest): Our API is unsound. The Rust API allows aliasing
             // pointers, but the C API requires pointers not to alias.
             // We should probably be at least using `&`/`&mut` here, see:
             // https://github.com/gnzlbg/ctest/issues/68
@@ -3270,427 +3562,588 @@ fn test_neutrino(target: &str) {
             // stack unwinding bug.
             "__my_thread_exit" => true,
 
+            // Wrong const-ness
+            "dl_iterate_phdr" => true,
+
             _ => false,
         }
     });
 
-    cfg.skip_field_type(move |struct_, field| {
+    cfg.skip_struct_field_type(move |struct_, field| {
         // sigval is actually a union, but we pretend it's a struct
-        struct_ == "sigevent" && field == "sigev_value" ||
+        struct_.ident() == "sigevent" && field.ident() == "sigev_value" ||
         // Anonymous structures
-        struct_ == "_idle_hook" && field == "time"
+        struct_.ident() == "_idle_hook" && field.ident() == "time"
     });
 
-    cfg.skip_field(move |struct_, field| {
-        (struct_ == "__sched_param" && field == "reserved") ||
-        (struct_ == "sched_param" && field == "reserved") ||
-        (struct_ == "sigevent" && field == "__padding1") || // ensure alignment
-        (struct_ == "sigevent" && field == "__padding2") || // union
-        (struct_ == "sigevent" && field == "__sigev_un2") || // union
-        // sighandler_t type is super weird
-        (struct_ == "sigaction" && field == "sa_sigaction") ||
-        // does not exist
-        (struct_ == "syspage_entry" && field == "__reserved") ||
-        false // keep me for smaller diffs when something is added above
+    cfg.skip_struct_field(|struct_, field| {
+        matches!(
+            (struct_.ident(), field.ident()),
+            ("__sched_param", "reserved")
+            | ("sched_param", "reserved")
+            | ("sigevent", "__padding1") // ensure alignment
+            | ("sigevent", "__padding2") // union
+            | ("sigevent", "__sigev_un2") // union
+            | ("sigaction", "sa_sigaction") // sighandler_t type is super weird
+            | ("syspage_entry", "__reserved") // does not exist
+        )
     });
 
-    cfg.skip_static(move |name| (name == "__dso_handle"));
+    cfg.skip_static(move |static_| static_.ident() == "__dso_handle");
 
-    cfg.generate("../src/lib.rs", "main.rs");
+    ctest::generate_test(&mut cfg, "../src/lib.rs", "ctest_output.rs").unwrap();
+}
+
+fn which_vxworks() -> Option<(u32, u32)> {
+    let version = env::var("WIND_RELEASE_ID").ok()?; // When in VxWorks setup, WIND_RELEASE_ID is
+                                                     // always set as the version of the release.
+
+    let mut pieces = version.trim().split(['.']);
+
+    let major: u32 = pieces.next().and_then(|x| x.parse().ok()).unwrap_or(0);
+    let minor: u32 = pieces.next().and_then(|x| x.parse().ok()).unwrap_or(0);
+
+    Some((major, minor))
 }
 
 fn test_vxworks(target: &str) {
     assert!(target.contains("vxworks"));
 
-    let mut cfg = ctest::TestGenerator::new();
-    headers! { cfg:
-               "vxWorks.h",
-               "yvals.h",
-               "nfs/nfsCommon.h",
-               "rtpLibCommon.h",
-               "randomNumGen.h",
-               "taskLib.h",
-               "sysLib.h",
-               "ioLib.h",
-               "inetLib.h",
-               "socket.h",
-               "errnoLib.h",
-               "ctype.h",
-               "dirent.h",
-               "dlfcn.h",
-               "elf.h",
-               "fcntl.h",
-               "grp.h",
-               "sys/poll.h",
-               "ifaddrs.h",
-               "langinfo.h",
-               "limits.h",
-               "link.h",
-               "locale.h",
-               "sys/stat.h",
-               "netdb.h",
-               "pthread.h",
-               "pwd.h",
-               "sched.h",
-               "semaphore.h",
-               "signal.h",
-               "stddef.h",
-               "stdint.h",
-               "stdio.h",
-               "stdlib.h",
-               "string.h",
-               "sys/file.h",
-               "sys/ioctl.h",
-               "sys/socket.h",
-               "sys/time.h",
-               "sys/times.h",
-               "sys/types.h",
-               "sys/uio.h",
-               "sys/un.h",
-               "sys/utsname.h",
-               "sys/wait.h",
-               "netinet/tcp.h",
-               "syslog.h",
-               "termios.h",
-               "time.h",
-               "ucontext.h",
-               "unistd.h",
-               "utime.h",
-               "wchar.h",
-               "errno.h",
-               "sys/mman.h",
-               "pathLib.h",
-               "mqueue.h",
+    let mut cfg = ctest_cfg();
+
+    let vxworks_ver = which_vxworks();
+
+    if vxworks_ver < Some((25, 9)) {
+        cfg.cfg("vxworks_lt_25_09", None);
     }
-    // FIXME
-    cfg.skip_const(move |name| match name {
+
+    headers!(
+        cfg,
+        "vxWorks.h",
+        "semLibCommon.h",
+        "yvals.h",
+        "nfs/nfsCommon.h",
+        "rtpLibCommon.h",
+        "randomNumGen.h",
+        "taskLib.h",
+        "sysLib.h",
+        "ioLib.h",
+        "inetLib.h",
+        "socket.h",
+        "errnoLib.h",
+        "ctype.h",
+        "dirent.h",
+        "dlfcn.h",
+        "elf.h",
+        "fcntl.h",
+        "grp.h",
+        "ifaddrs.h",
+        "langinfo.h",
+        "limits.h",
+        "link.h",
+        "locale.h",
+        "netdb.h",
+        "pthread.h",
+        "pwd.h",
+        "sched.h",
+        "semaphore.h",
+        "signal.h",
+        "stddef.h",
+        "stdint.h",
+        "stdio.h",
+        "stdlib.h",
+        "string.h",
+        "sys/select.h",
+        "sys/stat.h",
+        "sys/poll.h",
+        "sys/file.h",
+        "sys/ioctl.h",
+        "sys/socket.h",
+        "sys/time.h",
+        "sys/times.h",
+        "sys/types.h",
+        "sys/uio.h",
+        "sys/un.h",
+        "sys/utsname.h",
+        "sys/wait.h",
+        "sys/ttycom.h",
+        "sys/utsname.h",
+        "sys/resource.h",
+        "sys/mman.h",
+        "netinet/tcp.h",
+        "netinet/udp.h",
+        "netinet/in.h",
+        "netinet6/in6.h",
+        "syslog.h",
+        "termios.h",
+        "time.h",
+        "ucontext.h",
+        "unistd.h",
+        "utime.h",
+        "wchar.h",
+        "errno.h",
+        "pathLib.h",
+        "mqueue.h",
+        "fnmatch.h",
+        "sioLibCommon.h",
+        "net/if.h",
+    );
+    // FIXME(vxworks)
+    cfg.skip_const(move |constant| match constant.ident() {
         // sighandler_t weirdness
         "SIG_DFL" | "SIG_ERR" | "SIG_IGN"
-        // This is not defined in vxWorks
-        | "RTLD_DEFAULT"   => true,
+        // These are not defined in VxWorks
+        | "RTLD_DEFAULT" | "PRIO_PROCESS"
+        // Sticky bits not supported
+        | "S_ISVTX"
+        // The following are obsolete for VxWorks
+        | "SIGIO" | "SIGWINCH" | "SIGLOST" => true,
         _ => false,
     });
-    // FIXME
-    cfg.skip_type(move |ty| match ty {
+    // FIXME(vxworks)
+    cfg.skip_alias(move |ty| match ty.ident() {
         "stat64" | "sighandler_t" | "off64_t" => true,
         _ => false,
     });
 
-    cfg.skip_field_type(move |struct_, field| match (struct_, field) {
-        ("siginfo_t", "si_value") | ("stat", "st_size") | ("sigaction", "sa_u") => true,
-        _ => false,
+    cfg.skip_struct_field_type(
+        move |struct_, field| match (struct_.ident(), field.ident()) {
+            ("siginfo_t", "si_value")
+            | ("stat", "st_size")
+            // sighandler_t type is super weird
+            | ("sigaction", "sa_sigaction")
+            // sa_u_t type is not defined in vxworks
+            | ("sigaction", "sa_u") => true,
+            _ => false,
+        },
+    );
+
+    cfg.skip_roundtrip(|_| false);
+
+    cfg.rename_struct_ty(move |ty| match ty {
+        "DIR" | "FILE" | "Dl_info" | "RTP_DESC" => Some(ty.to_string()),
+        t if t.ends_with("_t") => Some(t.to_string()),
+        _ => None,
     });
 
-    cfg.skip_roundtrip(move |s| match s {
-        _ => false,
-    });
-
-    cfg.type_name(move |ty, is_struct, is_union| match ty {
-        "DIR" | "FILE" | "Dl_info" | "RTP_DESC" => ty.to_string(),
-        t if is_union => format!("union {}", t),
-        t if t.ends_with("_t") => t.to_string(),
-        t if is_struct => format!("struct {}", t),
-        t => t.to_string(),
-    });
-
-    // FIXME
-    cfg.skip_fn(move |name| match name {
+    // FIXME(vxworks)
+    cfg.skip_fn(move |func| match func.ident() {
         // sigval
         "sigqueue" | "_sigqueue"
         // sighandler_t
         | "signal"
+        // This is used a realpath and not _realpath
+        | "_realpath"
         // not used in static linking by default
         | "dlerror" => true,
         _ => false,
     });
 
-    cfg.generate("../src/lib.rs", "main.rs");
+    // Not defined in vxworks. Just a crate specific union type.
+    cfg.skip_union(move |u| u.ident() == "sa_u_t");
+
+    ctest::generate_test(&mut cfg, "../src/lib.rs", "ctest_output.rs").unwrap();
 }
 
+fn config_gnu_bits(target: &str, cfg: &mut ctest::TestGenerator) {
+    let pointer_width = env::var("CARGO_CFG_TARGET_POINTER_WIDTH").unwrap_or_default();
+    if target.contains("gnu")
+        && target.contains("linux")
+        && !target.ends_with("x32")
+        && !target.contains("riscv32")
+        && pointer_width == "32"
+    {
+        let defaultbits = "32".to_string();
+        let (timebits, filebits) = match (
+            env::var("RUST_LIBC_UNSTABLE_GNU_TIME_BITS"),
+            env::var("RUST_LIBC_UNSTABLE_GNU_FILE_OFFSET_BITS"),
+        ) {
+            (Ok(_), Ok(_)) => panic!("Do not set both RUST_LIBC_UNSTABLE_GNU_TIME_BITS and RUST_LIBC_UNSTABLE_GNU_FILE_OFFSET_BITS"),
+            (Err(_), Err(_)) => (defaultbits.clone(), defaultbits.clone()),
+            (Ok(tb), Err(_)) if tb == "64" => (tb.clone(), tb.clone()),
+            (Ok(tb), Err(_)) if tb == "32" => (tb, defaultbits.clone()),
+            (Ok(_), Err(_)) => panic!("Invalid value for RUST_LIBC_UNSTABLE_GNU_TIME_BITS, must be 32 or 64"),
+            (Err(_), Ok(fb)) if fb == "32" || fb == "64" => (defaultbits.clone(), fb),
+            (Err(_), Ok(_)) => panic!("Invalid value for RUST_LIBC_UNSTABLE_GNU_FILE_OFFSET_BITS, must be 32 or 64"),
+        };
+        let valid_bits = ["32", "64"];
+        assert!(
+            valid_bits.contains(&filebits.as_str()) && valid_bits.contains(&timebits.as_str()),
+            "Invalid value for RUST_LIBC_UNSTABLE_GNU_TIME_BITS or RUST_LIBC_UNSTABLE_GNU_FILE_OFFSET_BITS, must be 32, 64 or unset"
+        );
+        assert!(
+            !(filebits == "32" && timebits == "64"),
+            "RUST_LIBC_UNSTABLE_GNU_FILE_OFFSET_BITS must be 64 or unset if RUST_LIBC_UNSTABLE_GNU_TIME_BITS is 64"
+        );
+        if timebits == "64" {
+            cfg.define("_TIME_BITS", Some("64"));
+            cfg.cfg("linux_time_bits64", None);
+            cfg.cfg("gnu_time_bits64", None);
+        }
+        if filebits == "64" {
+            cfg.define("_FILE_OFFSET_BITS", Some("64"));
+            cfg.cfg("gnu_file_offset_bits64", None);
+        }
+    }
+}
+
+// This also covers the L4Re targets since they have a similar API surface
 fn test_linux(target: &str) {
-    assert!(target.contains("linux"));
+    assert!(target.contains("linux") || target.contains("l4re"));
+
+    // FIXME(linux32): Some 32 bit targets use old kernel headers because newer distros enforce 64
+    // bit time. Use this to avoid skipping tests also on 64 bit targets.
+    let pointer_width = env::var("CARGO_CFG_TARGET_POINTER_WIDTH")
+        .unwrap_or_default()
+        .parse::<usize>()
+        .unwrap_or_default();
+
+    // target_os
+    let linux = target.contains("linux");
+    let l4re = target.contains("l4re");
 
     // target_env
     let gnu = target.contains("gnu");
     let musl = target.contains("musl") || target.contains("ohos");
     let uclibc = target.contains("uclibc");
 
-    match (gnu, musl, uclibc) {
-        (true, false, false) => (),
-        (false, true, false) => (),
-        (false, false, true) => (),
-        (_, _, _) => panic!(
-            "linux target lib is gnu: {}, musl: {}, uclibc: {}",
-            gnu, musl, uclibc
+    match (l4re, gnu, musl, uclibc) {
+        (false, true, false, false) => (),
+        (false, false, true, false) => (),
+        (false, false, false, true) => (),
+        (true, false, false, true) => (),
+        (_, _, _, _) => panic!(
+            "{} target lib is gnu: {gnu}, musl: {musl}, uclibc: {uclibc}",
+            if linux { "linux" } else { "l4re" }
         ),
     }
 
     let arm = target.contains("arm");
+    let eabihf = target.contains("eabihf");
     let aarch64 = target.contains("aarch64");
     let i686 = target.contains("i686");
     let ppc = target.contains("powerpc");
     let ppc64 = target.contains("powerpc64");
+    let ppc32 = ppc && !ppc64;
     let s390x = target.contains("s390x");
+    let sparc = target.contains("sparc");
     let sparc64 = target.contains("sparc64");
     let x32 = target.contains("x32");
     let x86_32 = target.contains("i686");
     let x86_64 = target.contains("x86_64");
-    let aarch64_musl = aarch64 && musl;
     let gnueabihf = target.contains("gnueabihf");
     let x86_64_gnux32 = target.contains("gnux32") && x86_64;
     let riscv64 = target.contains("riscv64");
+    let hexagon = target.contains("hexagon");
     let loongarch64 = target.contains("loongarch64");
+    let wasm32 = target.contains("wasm32");
     let uclibc = target.contains("uclibc");
+    let mips = target.contains("mips");
+    let mips64 = target.contains("mips64");
+    let mips32 = mips && !mips64;
+
+    let musl_v1_2_3 = env::var("RUST_LIBC_UNSTABLE_MUSL_V1_2_3").is_ok();
+    if musl_v1_2_3 {
+        assert!(musl);
+    }
+    let old_musl = musl && !musl_v1_2_3;
 
     let mut cfg = ctest_cfg();
-    cfg.define("_GNU_SOURCE", None);
-    // This macro re-defines fscanf,scanf,sscanf to link to the symbols that are
-    // deprecated since glibc >= 2.29. This allows Rust binaries to link against
-    // glibc versions older than 2.29.
-    cfg.define("__GLIBC_USE_DEPRECATED_SCANF", None);
+    if (musl_v1_2_3 || loongarch64 || hexagon) && musl {
+        cfg.cfg("musl_v1_2_3", None);
+        if arm || hexagon || ppc32 || x86_32 || mips32 {
+            cfg.cfg("musl32_time64", None);
+            cfg.cfg("linux_time_bits64", None);
+        }
+    }
+    cfg.define("_GNU_SOURCE", None)
+        // This macro re-defines fscanf,scanf,sscanf to link to the symbols that are
+        // deprecated since glibc >= 2.29. This allows Rust binaries to link against
+        // glibc versions older than 2.29.
+        .define("__GLIBC_USE_DEPRECATED_SCANF", None);
 
-    headers! { cfg:
-               "ctype.h",
-               "dirent.h",
-               "dlfcn.h",
-               "elf.h",
-               "fcntl.h",
-               "fnmatch.h",
-               "getopt.h",
-               "glob.h",
-               [gnu]: "gnu/libc-version.h",
-               "grp.h",
-               "iconv.h",
-               "ifaddrs.h",
-               "langinfo.h",
-               "libgen.h",
-               "limits.h",
-               "link.h",
-               "linux/sysctl.h",
-               "locale.h",
-               "malloc.h",
-               "mntent.h",
-               "mqueue.h",
-               "net/ethernet.h",
-               "net/if.h",
-               "net/if_arp.h",
-               "net/route.h",
-               "netdb.h",
-               "netinet/in.h",
-               "netinet/ip.h",
-               "netinet/tcp.h",
-               "netinet/udp.h",
-               "poll.h",
-               "pthread.h",
-               "pty.h",
-               "pwd.h",
-               "regex.h",
-               "resolv.h",
-               "sched.h",
-               "semaphore.h",
-               "shadow.h",
-               "signal.h",
-               "spawn.h",
-               "stddef.h",
-               "stdint.h",
-               "stdio.h",
-               "stdlib.h",
-               "string.h",
-               "sys/epoll.h",
-               "sys/eventfd.h",
-               "sys/file.h",
-               "sys/fsuid.h",
-               "sys/klog.h",
-               "sys/inotify.h",
-               "sys/ioctl.h",
-               "sys/ipc.h",
-               "sys/mman.h",
-               "sys/mount.h",
-               "sys/msg.h",
-               "sys/personality.h",
-               "sys/prctl.h",
-               "sys/ptrace.h",
-               "sys/quota.h",
-               "sys/random.h",
-               "sys/reboot.h",
-               "sys/resource.h",
-               "sys/sem.h",
-               "sys/sendfile.h",
-               "sys/shm.h",
-               "sys/signalfd.h",
-               "sys/socket.h",
-               "sys/stat.h",
-               "sys/statvfs.h",
-               "sys/swap.h",
-               "sys/syscall.h",
-               "sys/time.h",
-               "sys/timerfd.h",
-               "sys/times.h",
-               "sys/timex.h",
-               "sys/types.h",
-               "sys/uio.h",
-               "sys/un.h",
-               "sys/user.h",
-               "sys/utsname.h",
-               "sys/vfs.h",
-               "sys/wait.h",
-               "syslog.h",
-               "termios.h",
-               "time.h",
-               "ucontext.h",
-               "unistd.h",
-               "utime.h",
-               "utmp.h",
-               "utmpx.h",
-               "wchar.h",
-               "errno.h",
-               // `sys/io.h` is only available on x86*, Alpha, IA64, and 32-bit
-               // ARM: https://bugzilla.redhat.com/show_bug.cgi?id=1116162
-               // Also unavailable on gnueabihf with glibc 2.30.
-               // https://sourceware.org/git/?p=glibc.git;a=commitdiff;h=6b33f373c7b9199e00ba5fbafd94ac9bfb4337b1
-               [(x86_64 || x86_32 || arm) && !gnueabihf]: "sys/io.h",
-               // `sys/reg.h` is only available on x86 and x86_64
-               [x86_64 || x86_32]: "sys/reg.h",
-               // sysctl system call is deprecated and not available on musl
-               // It is also unsupported in x32, deprecated since glibc 2.30:
-               [!(x32 || musl || gnu)]: "sys/sysctl.h",
-               // <execinfo.h> is not supported by musl:
-               // https://www.openwall.com/lists/musl/2015/04/09/3
-               // <execinfo.h> is not present on uclibc.
-               [!(musl || uclibc)]: "execinfo.h",
+    config_gnu_bits(target, &mut cfg);
+    // The L4Re libc headers contain some L4Re helper functions which are not needed for the libc
+    // interface and must not be added to the libc crate
+    if l4re {
+        cfg.flag("-Wno-unused-function");
     }
 
+    headers!(
+        cfg,
+        "ctype.h",
+        "dirent.h",
+        "dlfcn.h",
+        "elf.h",
+        "fcntl.h",
+        "fnmatch.h",
+        "getopt.h",
+        "glob.h",
+        (gnu, "gnu/libc-version.h"),
+        "grp.h",
+        "iconv.h",
+        "ifaddrs.h",
+        "langinfo.h",
+        "libgen.h",
+        "limits.h",
+        "link.h",
+        (!l4re, "linux/sysctl.h"),
+        "locale.h",
+        "malloc.h",
+        "mntent.h",
+        (!l4re, "mqueue.h"),
+        "net/ethernet.h",
+        "net/if.h",
+        "net/if_arp.h",
+        "net/route.h",
+        "netdb.h",
+        "netinet/in.h",
+        "netinet/ip.h",
+        "netinet/tcp.h",
+        "netinet/udp.h",
+        (l4re, "netpacket/packet.h"),
+        "poll.h",
+        "pthread.h",
+        "pty.h",
+        "pwd.h",
+        "regex.h",
+        "resolv.h",
+        "sched.h",
+        "semaphore.h",
+        "shadow.h",
+        "signal.h",
+        (!l4re, "spawn.h"),
+        (!l4re, "stddef.h"),
+        "stdint.h",
+        "stdio.h",
+        "stdlib.h",
+        "string.h",
+        (l4re, "sys/auxv.h"),
+        (!l4re, "sys/epoll.h"),
+        (!l4re, "sys/eventfd.h"),
+        "sys/file.h",
+        (!l4re, "sys/fsuid.h"),
+        (!l4re, "sys/klog.h"),
+        (!l4re, "sys/inotify.h"),
+        "sys/ioctl.h",
+        "sys/ipc.h",
+        "sys/mman.h",
+        "sys/mount.h",
+        (!l4re, "sys/msg.h"),
+        (!l4re, "sys/personality.h"),
+        "sys/prctl.h",
+        (!l4re, "sys/ptrace.h"),
+        (!l4re, "sys/quota.h"),
+        (!l4re, "sys/random.h"),
+        (!l4re, "sys/reboot.h"),
+        "sys/resource.h",
+        "sys/sem.h",
+        (!l4re, "sys/sendfile.h"),
+        "sys/shm.h",
+        (!l4re, "sys/signalfd.h"),
+        "sys/socket.h",
+        "sys/stat.h",
+        "sys/statvfs.h",
+        (!l4re, "sys/swap.h"),
+        "sys/syscall.h",
+        "sys/time.h",
+        (!l4re, "sys/timerfd.h"),
+        "sys/times.h",
+        (!l4re, "sys/timex.h"),
+        "sys/types.h",
+        "sys/uio.h",
+        "sys/un.h",
+        "sys/user.h",
+        "sys/utsname.h",
+        "sys/vfs.h",
+        "sys/wait.h",
+        "syslog.h",
+        "termios.h",
+        "time.h",
+        "ucontext.h",
+        "unistd.h",
+        "utime.h",
+        "utmp.h",
+        "utmpx.h",
+        "wchar.h",
+        "errno.h",
+        // `sys/io.h` is only available on x86*, Alpha, IA64, and 32-bit
+        // ARM: https://bugzilla.redhat.com/show_bug.cgi?id=1116162
+        // Also unavailable on gnueabihf with glibc 2.30.
+        // https://sourceware.org/git/?p=glibc.git;a=commitdiff;h=6b33f373c7b9199e00ba5fbafd94ac9bfb4337b1
+        ((x86_64 || x86_32 || arm) && !gnueabihf && !l4re, "sys/io.h"),
+        // `sys/reg.h` is only available on x86 and x86_64
+        ((x86_64 || x86_32) && !l4re, "sys/reg.h"),
+        // sysctl system call is deprecated and not available on musl
+        // It is also unsupported in x32, deprecated since glibc 2.30:
+        (!(x32 || musl || gnu || l4re), "sys/sysctl.h"),
+        // <execinfo.h> is not supported by musl:
+        // https://www.openwall.com/lists/musl/2015/04/09/3
+        // <execinfo.h> is not present on uclibc.
+        (!(musl || uclibc), "execinfo.h"),
+    );
+
     // Include linux headers at the end:
-    headers! {
-        cfg:
-        [loongarch64]: "asm/hwcap.h",
-        [riscv64]: "asm/hwcap.h",
-        "asm/mman.h",
-        [gnu]: "linux/aio_abi.h",
-        "linux/can.h",
-        "linux/can/raw.h",
-        // FIXME: requires kernel headers >= 5.4.1.
-        [!musl]: "linux/can/j1939.h",
-        "linux/dccp.h",
-        "linux/errqueue.h",
-        "linux/falloc.h",
-        "linux/filter.h",
-        "linux/fs.h",
-        "linux/futex.h",
-        "linux/genetlink.h",
-        "linux/if.h",
-        "linux/if_addr.h",
-        "linux/if_alg.h",
-        "linux/if_ether.h",
-        "linux/if_packet.h",
-        "linux/if_tun.h",
-        "linux/if_xdp.h",
-        "linux/input.h",
-        "linux/ipv6.h",
-        "linux/kexec.h",
-        "linux/keyctl.h",
-        "linux/magic.h",
-        "linux/memfd.h",
-        "linux/membarrier.h",
-        "linux/mempolicy.h",
-        "linux/mman.h",
-        "linux/module.h",
-        // FIXME: requires kernel headers >= 5.1.
-        [!musl]: "linux/mount.h",
-        "linux/net_tstamp.h",
-        "linux/netfilter/nfnetlink.h",
-        "linux/netfilter/nfnetlink_log.h",
-        "linux/netfilter/nfnetlink_queue.h",
-        "linux/netfilter/nf_tables.h",
-        "linux/netfilter_ipv4.h",
-        "linux/netfilter_ipv6.h",
-        "linux/netfilter_ipv6/ip6_tables.h",
-        "linux/netlink.h",
-        // FIXME: requires Linux >= 5.6:
-        [!musl]: "linux/openat2.h",
-        [!musl]: "linux/ptrace.h",
-        "linux/quota.h",
-        "linux/random.h",
-        "linux/reboot.h",
-        "linux/rtnetlink.h",
-        "linux/sched.h",
-        "linux/sctp.h",
-        "linux/seccomp.h",
-        "linux/sock_diag.h",
-        "linux/sockios.h",
-        "linux/tls.h",
-        "linux/uinput.h",
-        "linux/vm_sockets.h",
-        "linux/wait.h",
-        "linux/wireless.h",
-        "sys/fanotify.h",
-        // <sys/auxv.h> is not present on uclibc
-        [!uclibc]: "sys/auxv.h",
-        [gnu]: "linux/close_range.h",
+    headers!(
+        cfg,
+        ((loongarch64 || riscv64) && !l4re, "asm/hwcap.h"),
+        (!l4re, "asm/mman.h"),
+    );
+
+    if !wasm32 && !l4re {
+        headers!(
+            cfg,
+            (gnu, "linux/aio_abi.h"),
+            "linux/can.h",
+            "linux/can/bcm.h",
+            "linux/can/error.h",
+            "linux/can/raw.h",
+            "linux/can/j1939.h",
+            "linux/cn_proc.h",
+            "linux/connector.h",
+            "linux/dccp.h",
+            "linux/errqueue.h",
+            "linux/falloc.h",
+            "linux/filter.h",
+            "linux/fs.h",
+            "linux/futex.h",
+            "linux/genetlink.h",
+            "linux/if.h",
+            "linux/if_addr.h",
+            "linux/if_alg.h",
+            "linux/if_ether.h",
+            "linux/if_packet.h",
+            "linux/if_tun.h",
+            "linux/if_xdp.h",
+            "linux/input.h",
+            "linux/ipv6.h",
+            "linux/kexec.h",
+            "linux/keyctl.h",
+            "linux/magic.h",
+            "linux/memfd.h",
+            "linux/membarrier.h",
+            "linux/mempolicy.h",
+            "linux/mman.h",
+            "linux/module.h",
+            "linux/mount.h",
+            "linux/net_tstamp.h",
+            "linux/netfilter/nfnetlink.h",
+            "linux/netfilter/nfnetlink_log.h",
+            "linux/netfilter/nfnetlink_queue.h",
+            "linux/netfilter/nf_tables.h",
+            "linux/netfilter_arp.h",
+            "linux/netfilter_bridge.h",
+            "linux/netfilter_ipv4.h",
+            "linux/netfilter_ipv6.h",
+            "linux/netfilter_ipv6/ip6_tables.h",
+            "linux/netlink.h",
+            "linux/nsfs.h",
+            "linux/openat2.h",
+            // FIXME(linux): some items require Linux >= 5.6:
+            "linux/ptp_clock.h",
+            "linux/ptrace.h",
+            "linux/quota.h",
+            "linux/random.h",
+            "linux/reboot.h",
+            "linux/rtnetlink.h",
+            "linux/sched.h",
+            "linux/sctp.h",
+            "linux/seccomp.h",
+            "linux/securebits.h",
+            "linux/sock_diag.h",
+            "linux/sockios.h",
+            "linux/tls.h",
+            "linux/uinput.h",
+            "linux/vm_sockets.h",
+            "linux/wait.h",
+            "linux/wireless.h",
+            "sys/fanotify.h",
+            // <sys/auxv.h> is not present on uclibc
+            (!uclibc, "sys/auxv.h"),
+            (gnu || musl, "linux/close_range.h"),
+        );
     }
 
     // note: aio.h must be included before sys/mount.h
-    headers! {
-        cfg:
-        "sys/xattr.h",
+    headers!(
+        cfg,
+        (!l4re, "sys/xattr.h"),
         "sys/sysinfo.h",
         // AIO is not supported by uclibc:
-        [!uclibc]: "aio.h",
-    }
+        (!uclibc, "aio.h"),
+    );
 
-    cfg.type_name(move |ty, is_struct, is_union| {
+    // Just pass all these through, no need for a "struct" prefix
+    let typedef_structs = [
+        "FILE",
+        "fd_set",
+        "Dl_info",
+        "DIR",
+        "Elf32_Phdr",
+        "Elf64_Phdr",
+        "Elf32_Shdr",
+        "Elf64_Shdr",
+        "Elf32_Sym",
+        "Elf64_Sym",
+        "Elf32_Ehdr",
+        "Elf64_Ehdr",
+        "Elf32_Chdr",
+        "Elf64_Chdr",
+    ];
+    // typedefs don't need any keywords
+    cfg.rename_struct_ty(move |ty| typedef_structs.contains(&ty).then_some(ty.to_string()))
+        .rename_struct_ty(|ty| ty.ends_with("_t").then_some(ty.to_string()))
+        .rename_union_ty(|ty| ty.ends_with("_t").then_some(ty.to_string()));
+
+    cfg.rename_type(move |ty| {
         match ty {
-            // Just pass all these through, no need for a "struct" prefix
-            "FILE" | "fd_set" | "Dl_info" | "DIR" | "Elf32_Phdr" | "Elf64_Phdr" | "Elf32_Shdr"
-            | "Elf64_Shdr" | "Elf32_Sym" | "Elf64_Sym" | "Elf32_Ehdr" | "Elf64_Ehdr"
-            | "Elf32_Chdr" | "Elf64_Chdr" => ty.to_string(),
-
-            "Ioctl" if gnu => "unsigned long".to_string(),
-            "Ioctl" => "int".to_string(),
-
+            "Ioctl" if gnu || uclibc => Some("unsigned long".to_string()),
+            "Ioctl" => Some("int".to_string()),
             // LFS64 types have been removed in musl 1.2.4+
-            "off64_t" if musl => "off_t".to_string(),
-
-            // typedefs don't need any keywords
-            t if t.ends_with("_t") => t.to_string(),
-            // put `struct` in front of all structs:.
-            t if is_struct => format!("struct {}", t),
-            // put `union` in front of all unions:
-            t if is_union => format!("union {}", t),
-
-            t => t.to_string(),
+            "off64_t" if musl => Some("off_t".to_string()),
+            "fsword_t" if uclibc => Some("__SWORD_TYPE".to_string()),
+            _ => None,
         }
     });
 
-    cfg.field_name(move |struct_, field| {
-        match field {
+    cfg.rename_struct_field(move |struct_, field| {
+        match (struct_.ident(), field.ident()) {
             // Our stat *_nsec fields normally don't actually exist but are part
             // of a timeval struct
-            s if s.ends_with("_nsec") && struct_.starts_with("stat") => {
-                s.replace("e_nsec", ".tv_nsec")
+            ("stat" | "statfs" | "statvfs" | "stat64" | "statfs64" | "statvfs64", f)
+                if f.ends_with("_nsec") =>
+            {
+                Some(f.replace("e_nsec", ".tv_nsec"))
             }
-            // FIXME: epoll_event.data is actually a union in C, but in Rust
+
+            // FIXME(linux): epoll_event.data is actually a union in C, but in Rust
             // it is only a u64 because we only expose one field
             // http://man7.org/linux/man-pages/man2/epoll_wait.2.html
-            "u64" if struct_ == "epoll_event" => "data.u64".to_string(),
+            ("epoll_event", "u64") => Some("data.u64".to_string()),
             // The following structs have a field called `type` in C,
             // but `type` is a Rust keyword, so these fields are translated
             // to `type_` in Rust.
-            "type_"
-                if struct_ == "input_event"
-                    || struct_ == "input_mask"
-                    || struct_ == "ff_effect" =>
-            {
-                "type".to_string()
-            }
+            ("input_event" | "input_mask" | "ff_effect", "type_") => Some("type".to_string()),
 
-            s => s.to_string(),
+            // FIXME(1.0): field has a different name on loongarch
+            ("ucontext_t", "uc_flags") if loongarch64 => Some("__uc_flags".to_string()),
+
+            _ => None,
         }
     });
 
-    cfg.skip_type(move |ty| {
+    cfg.skip_alias(move |alias| {
+        let ty = alias.ident();
+        // FIXME(musl): very recent additions to musl, not yet released.
+        // also apparently some glibc versions
+        if ty == "Elf32_Relr" || ty == "Elf64_Relr" {
+            return true;
+        }
+        if sparc64 && (ty == "Elf32_Rela" || ty == "Elf64_Rela") {
+            return true;
+        }
         match ty {
-            // FIXME: `sighandler_t` type is incorrect, see:
+            // FIXME(sighandler): `sighandler_t` type is incorrect, see:
             // https://github.com/rust-lang/libc/issues/1359
             "sighandler_t" => true,
 
@@ -3709,11 +4162,6 @@ fn test_linux(target: &str) {
             // specific type.
             "Ioctl" => true,
 
-            // FIXME: requires >= 5.4.1 kernel headers
-            "pgn_t" if musl => true,
-            "priority_t" if musl => true,
-            "name_t" if musl => true,
-
             t => {
                 if musl {
                     // LFS64 types have been removed in musl 1.2.4+
@@ -3725,24 +4173,11 @@ fn test_linux(target: &str) {
         }
     });
 
-    cfg.skip_struct(move |ty| {
-        if ty.starts_with("__c_anonymous_") {
-            return true;
-        }
-        // FIXME: musl CI has old headers
-        if musl && ty.starts_with("uinput_") {
-            return true;
-        }
-        if musl && ty == "seccomp_notif" {
-            return true;
-        }
-        if musl && ty == "seccomp_notif_addfd" {
-            return true;
-        }
-        if musl && ty == "seccomp_notif_resp" {
-            return true;
-        }
-        if musl && ty == "seccomp_notif_sizes" {
+    cfg.skip_struct(move |struct_| {
+        let ty = struct_.ident();
+
+        // FIXME(linux): Requires >= 6.12 kernel headers. CI has old headers
+        if ty == "ptp_sys_offset_extended" {
             return true;
         }
 
@@ -3750,17 +4185,14 @@ fn test_linux(target: &str) {
         if musl && (ty.ends_with("64") || ty.ends_with("64_t")) {
             return true;
         }
-        // FIXME: sparc64 CI has old headers
+
+        // FIXME(linux): sparc64 CI has old headers
         if sparc64 && (ty == "uinput_ff_erase" || ty == "uinput_abs_setup") {
             return true;
         }
-        // FIXME(https://github.com/rust-lang/libc/issues/1558): passing by
-        // value corrupts the value for reasons not understood.
-        if (gnu && sparc64) && (ty == "ip_mreqn" || ty == "hwtstamp_config") {
-            return true;
-        }
-        // FIXME(https://github.com/rust-lang/rust/issues/43894): pass by value for structs that are not an even 32/64 bits on
-        // big-endian systems corrupts the value for unknown reasons.
+
+        // FIXME(rust-lang/rust#43894): pass by value for structs that are not an even 32/64 bits
+        // on big-endian systems corrupts the value for unknown reasons.
         if (sparc64 || ppc || ppc64 || s390x)
             && (ty == "sockaddr_pkt"
                 || ty == "tpacket_auxdata"
@@ -3771,7 +4203,8 @@ fn test_linux(target: &str) {
         {
             return true;
         }
-        // FIXME: musl doesn't compile with `struct fanout_args` for unknown reasons.
+
+        // FIXME(musl): musl doesn't compile with `struct fanout_args` for unknown reasons.
         if musl && ty == "fanout_args" {
             return true;
         }
@@ -3789,7 +4222,7 @@ fn test_linux(target: &str) {
             // which is absent in glibc, has to be defined.
             "__timeval" => true,
 
-            // FIXME: This is actually a union, not a struct
+            // FIXME(union): This is actually a union, not a struct
             "sigval" => true,
 
             // This type is tested in the `linux_termios.rs` file since there
@@ -3797,72 +4230,34 @@ fn test_linux(target: &str) {
             // structs.
             "termios2" => true,
 
-            // FIXME: remove once we set minimum supported glibc version.
-            // ucontext_t added a new field as of glibc 2.28; our struct definition is
-            // conservative and omits the field, but that means the size doesn't match for newer
-            // glibcs (see https://github.com/rust-lang/libc/issues/1410)
-            "ucontext_t" if gnu => true,
-
-            // FIXME: Somehow we cannot include headers correctly in glibc 2.30.
-            // So let's ignore for now and re-visit later.
-            // Probably related: https://gcc.gnu.org/bugzilla/show_bug.cgi?id=91085
-            "statx" => true,
-            "statx_timestamp" => true,
-
             // On Linux, the type of `ut_exit` field of struct `utmpx`
             // can be an anonymous struct, so an extra struct,
             // which is absent in musl, has to be defined.
             "__exit_status" if musl => true,
 
-            // clone_args might differ b/w libc versions
-            "clone_args" => true,
+            // FIXME(ppc): tests fail due to a field type mismatch (`long long unsigned` vs
+            // `long unsigned`).
+            "clone_args" if ppc64 => true,
 
+            // Linux >= 6.13 (pidfd_info.exit_code: Linux >= 6.15)
             // Might differ between kernel versions
-            "open_how" => true,
-
-            // FIXME: requires >= 5.4.1 kernel headers
-            "j1939_filter" if musl => true,
-
-            // FIXME: requires >= 5.4 kernel headers
-            "sockaddr_can" if musl => true,
+            "pidfd_info" => true,
 
             "sctp_initmsg" | "sctp_sndrcvinfo" | "sctp_sndinfo" | "sctp_rcvinfo"
             | "sctp_nxtinfo" | "sctp_prinfo" | "sctp_authinfo" => true,
 
-            // FIXME: requires >= 6.1 kernel headers
-            "canxl_frame" => true,
+            // FIXME(musl): A field was added in linux 6.8, not yet in musl
+            // FIXME(linux32): A field was added in linux 6.8
+            // https://github.com/torvalds/linux/commit/341ac980eab90ac1f6c22ee9f9da83ed9604d899
+            // The previous version of the struct was removed in 6.11 due to a bug.
+            // https://github.com/torvalds/linux/commit/32654bbd6313b4cfc82297e6634fa9725c3c900f
+            "xdp_umem_reg" if musl || pointer_width == 32 => true,
 
-            // FIXME: The size of `iv` has been changed since Linux v6.0
-            // https://github.com/torvalds/linux/commit/94dfc73e7cf4a31da66b8843f0b9283ddd6b8381
-            "af_alg_iv" => true,
-
-            // FIXME: Requires >= 5.1 kernel headers.
-            // Everything that uses install-musl.sh has 4.19 kernel headers.
-            "tls12_crypto_info_aes_gcm_256"
-                if (aarch64 || arm || i686 || s390x || x86_64) && musl =>
-            {
-                true
-            }
-
-            // FIXME: Requires >= 5.11 kernel headers.
-            // Everything that uses install-musl.sh has 4.19 kernel headers.
-            "tls12_crypto_info_chacha20_poly1305"
-                if (aarch64 || arm || i686 || s390x || x86_64) && musl =>
-            {
-                true
-            }
-
-            // FIXME: Requires >= 5.3 kernel headers.
-            // Everything that uses install-musl.sh has 4.19 kernel headers.
-            "xdp_options" if musl => true,
-
-            // FIXME: Requires >= 5.4 kernel headers.
-            // Everything that uses install-musl.sh has 4.19 kernel headers.
-            "xdp_umem_reg" | "xdp_ring_offset" | "xdp_mmap_offsets" if musl => true,
-
-            // FIXME: Requires >= 5.9 kernel headers.
-            // Everything that uses install-musl.sh has 4.19 kernel headers.
-            "xdp_statistics" if musl => true,
+            // FIXME(1.0,linux): A new field was added to `xsk_tx_metadata_request` in linux 6.15.
+            // https://github.com/torvalds/linux/commit/ca4419f15abd19ba8be1e109661b60f9f5b6c9f0
+            // When updating, consider giving the `__c_anonymous_` prefix to the enum variants
+            // `xsk_tx_metadata_request` and `xsk_tx_metadata_completion`.
+            "xsk_tx_metadata" | "xsk_tx_metadata_request" | "xsk_tx_metadata_completion" => true,
 
             // A new field was added in kernel 5.4, this is the old version for backwards compatibility.
             // https://github.com/torvalds/linux/commit/77cd0d7b3f257fd0e3096b4fdcff1a7d38e99e10
@@ -3882,14 +4277,37 @@ fn test_linux(target: &str) {
             // kernel so we can drop this and test the type once this new version is used in CI.
             "sched_attr" => true,
 
-            // FIXME: Requires >= 6.9 kernel headers.
+            // FIXME(linux): Requires >= 6.9 kernel headers.
             "epoll_params" => true,
+
+            // FIXME(linux): Requires >= 6.12 kernel headers.
+            "dmabuf_cmsg" | "dmabuf_token" => true,
+
+            // FIXME(linux): Requires >= 6.12 kernel headers.
+            "mnt_ns_info" => true,
+
+            // FIXME(musl): Struct has changed for new musl versions
+            "tcp_info" if musl => true,
+
+            // FIXME(musl): Supported in new musl but we don't have a new enough version in CI.
+            "statx" | "statx_timestamp" if musl => true,
+
+            // FIXME(musl): New fields in newer versions
+            "utmpx" if !old_musl => true,
 
             _ => false,
         }
     });
 
-    cfg.skip_const(move |name| {
+    cfg.skip_const(move |constant| {
+        let name = constant.ident();
+
+        // L4Re requires a min stack size of 64k; that isn't defined in uClibc, but
+        // somewhere in the core libraries. uClibc wants 16k, but that's not enough.
+        if l4re && name == "PTHREAD_STACK_MIN" {
+            return true;
+        }
+
         if !gnu {
             // Skip definitions from the kernel on non-glibc Linux targets.
             // They're libc-independent, so we only need to check them on one
@@ -3913,6 +4331,7 @@ fn test_linux(target: &str) {
                 || name.starts_with("OPEN_TREE_")
                 || name.starts_with("P_")
                 || name.starts_with("PF_")
+                || name.starts_with("PIDFD_")
                 || name.starts_with("RLIMIT_")
                 || name.starts_with("RTEXT_FILTER_")
                 || name.starts_with("SOL_")
@@ -3927,31 +4346,6 @@ fn test_linux(target: &str) {
             }
         }
         if musl {
-            // FIXME: Requires >= 5.0 kernel headers
-            if name == "SECCOMP_GET_NOTIF_SIZES"
-               || name == "SECCOMP_FILTER_FLAG_NEW_LISTENER"
-               || name == "SECCOMP_FILTER_FLAG_TSYNC_ESRCH"
-               || name == "SECCOMP_USER_NOTIF_FLAG_CONTINUE"  // requires >= 5.5
-               || name == "SECCOMP_ADDFD_FLAG_SETFD"  // requires >= 5.9
-               || name == "SECCOMP_ADDFD_FLAG_SEND"   // requires >= 5.9
-               || name == "SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV"  // requires >= 5.19
-            {
-                return true;
-            }
-            // FIXME: Requires >= 5.4.1 kernel headers
-            if name.starts_with("J1939")
-                || name.starts_with("RTEXT_FILTER_")
-                || name.starts_with("SO_J1939")
-                || name.starts_with("SCM_J1939")
-            {
-                return true;
-            }
-            // FIXME: Requires >= 5.10 kernel headers
-            if name.starts_with("MEMBARRIER_CMD_REGISTER")
-                || name.starts_with("MEMBARRIER_CMD_PRIVATE")
-            {
-                return true;
-            }
             // LFS64 types have been removed in musl 1.2.4+
             if name.starts_with("RLIM64") {
                 return true;
@@ -3960,101 +4354,136 @@ fn test_linux(target: &str) {
             if name.starts_with("NI_IDN") {
                 return true;
             }
-            // FIXME: Requires >= 6.3 kernel headers
-            if name == "MFD_NOEXEC_SEAL" || name == "MFD_EXEC" {
-                return true;
+
+            match name {
+                // FIXME: Does not exist on non-x86 architectures, slated for removal
+                // in libc in 1.0
+                "MAP_32BIT" if ppc64 => return true,
+
+                // FIXME(musl): None of these are actually defined in musl, they should be removed.
+                "SO_NETNS_COOKIE"
+                | "SO_BUF_LOCK"
+                | "SO_RESERVE_MEM"
+                | "SO_TXREHASH"
+                | "SO_RCVMARK"
+                | "SO_PASSPIDFD"
+                | "SO_PEERPIDFD"
+                | "SO_DEVMEM_LINEAR"
+                | "SO_DEVMEM_DMABUF"
+                | "SO_DEVMEM_DONTNEED"
+                | "SCM_DEVMEM_LINEAR"
+                | "SCM_DEVMEM_DMABUF"
+                | "FAN_EVENT_INFO_TYPE_ERROR"
+                | "FAN_EVENT_INFO_TYPE_NEW_DFID_NAME"
+                | "FAN_EVENT_INFO_TYPE_OLD_DFID_NAME"
+                | "FAN_FS_ERROR"
+                | "FAN_INFO"
+                | "FAN_MARK_EVICTABLE"
+                | "FAN_MARK_IGNORE"
+                | "FAN_MARK_IGNORE_SURV"
+                | "FAN_RENAME"
+                | "FAN_REPORT_DFID_NAME_TARGET"
+                | "FAN_REPORT_TARGET_FID"
+                | "FAN_RESPONSE_INFO_AUDIT_RULE"
+                | "FAN_RESPONSE_INFO_NONE"
+                | "PR_GET_MDWE"
+                | "PR_MDWE_NO_INHERIT"
+                | "PR_MDWE_REFUSE_EXEC_GAIN"
+                | "PR_SET_MDWE"
+                | "IPPROTO_ETHERNET"
+                | "IPPROTO_MPTCP"
+                | "SI_DETHREAD"
+                | "PR_SET_VMA"
+                | "PR_SET_VMA_ANON_NAME"
+                | "PR_SCHED_CORE"
+                | "PR_SCHED_CORE_CREATE"
+                | "PR_SCHED_CORE_GET"
+                | "PR_SCHED_CORE_MAX"
+                | "PR_SCHED_CORE_SCOPE_PROCESS_GROUP"
+                | "PR_SCHED_CORE_SCOPE_THREAD"
+                | "PR_SCHED_CORE_SCOPE_THREAD_GROUP"
+                | "PR_SCHED_CORE_SHARE_FROM"
+                | "PR_SCHED_CORE_SHARE_TO" => return true,
+
+                /* Added in versions more recent than what we test */
+                // Since 1.2.3
+                "SO_BUSY_POLL_BUDGET" | "SO_PREFER_BUSY_POLL" => return true,
+
+                // FIXME(musl): value was updated in new musl
+                "RLIM_NLIMITS" => return true,
+
+                // FIXME(musl): Values changed in newer musl versions on these arches
+                "O_LARGEFILE" if riscv64 || x86_64 => return true,
+
+                _ => (),
             }
         }
+
         match name {
             // These constants are not available if gnu headers have been included
             // and can therefore not be tested here
             //
             // The IPV6 constants are tested in the `linux_ipv6.rs` tests:
-            | "IPV6_FLOWINFO"
+            "IPV6_FLOWINFO"
             | "IPV6_FLOWLABEL_MGR"
             | "IPV6_FLOWINFO_SEND"
             | "IPV6_FLOWINFO_FLOWLABEL"
-            | "IPV6_FLOWINFO_PRIORITY"
+            | "IPV6_FLOWINFO_PRIORITY" => true,
             // The F_ fnctl constants are tested in the `linux_fnctl.rs` tests:
-            | "F_CANCELLK"
+            "F_CANCELLK"
             | "F_ADD_SEALS"
             | "F_GET_SEALS"
             | "F_SEAL_SEAL"
             | "F_SEAL_SHRINK"
             | "F_SEAL_GROW"
-            | "F_SEAL_WRITE" => true,
+            | "F_SEAL_WRITE"
+            | "F_SEAL_FUTURE_WRITE"
+            | "F_SEAL_EXEC" => true,
             // The `ARPHRD_CAN` is tested in the `linux_if_arp.rs` tests
             // because including `linux/if_arp.h` causes some conflicts:
             "ARPHRD_CAN" => true,
 
-            // FIXME: deprecated: not available in any header
+            // FIXME(deprecated): deprecated: not available in any header
             // See: https://github.com/rust-lang/libc/issues/1356
             "ENOATTR" => true,
 
-            // FIXME: SIGUNUSED was removed in glibc 2.26
+            // FIXME(deprecated): SIGUNUSED was removed in glibc 2.26
             // Users should use SIGSYS instead.
             "SIGUNUSED" => true,
 
-            // FIXME: conflicts with glibc headers and is tested in
+            // FIXME(linux): conflicts with glibc headers and is tested in
             // `linux_termios.rs` below:
-            | "BOTHER"
-            | "IBSHIFT"
-            | "TCGETS2"
-            | "TCSETS2"
-            | "TCSETSW2"
-            | "TCSETSF2" => true,
+            "BOTHER" | "IBSHIFT" | "TCGETS2" | "TCSETS2" | "TCSETSW2" | "TCSETSF2" => true,
 
-            // FIXME: on musl the pthread types are defined a little differently
+            // FIXME(musl): on musl the pthread types are defined a little differently
             // - these constants are used by the glibc implementation.
-            n if musl && n.contains("__SIZEOF_PTHREAD") => true,
+            n if (musl || uclibc) && n.contains("__SIZEOF_PTHREAD") => true,
 
-            // FIXME: It was extended to 4096 since glibc 2.31 (Linux 5.4).
+            // FIXME(linux): It was extended to 4096 since glibc 2.31 (Linux 5.4).
             // We should do so after a while.
             "SOMAXCONN" if gnu => true,
 
             // deprecated: not available from Linux kernel 5.6:
             "VMADDR_CID_RESERVED" => true,
 
-            // IPPROTO_MAX was increased in 5.6 for IPPROTO_MPTCP:
-            | "IPPROTO_MAX"
-            | "IPPROTO_ETHERNET"
-            | "IPPROTO_MPTCP" => true,
+            // FIXME(value): IPPROTO_MAX was increased in 5.6 for IPPROTO_MPTCP:
+            "IPPROTO_MAX" => true,
 
-            // FIXME: Not yet implemented on sparc64
+            // FIXME(linux): Not yet implemented on sparc64
             "SYS_clone3" if sparc64 => true,
 
-            // FIXME: Not defined on ARM, gnueabihf, musl, PowerPC, riscv64, s390x, and sparc64.
-            "SYS_memfd_secret" if arm | gnueabihf | musl | ppc | riscv64 | s390x | sparc64 => true,
+            // FIXME(linux): Not defined on ARM, gnueabihf, mips, musl, PowerPC, riscv64, s390x, and sparc64.
+            "SYS_memfd_secret"
+                if arm | gnueabihf | mips | musl | ppc | riscv64 | s390x | sparc64 =>
+            {
+                true
+            }
 
-            // FIXME: Added in Linux 5.16
-            // https://github.com/torvalds/linux/commit/039c0ec9bb77446d7ada7f55f90af9299b28ca49
-            "SYS_futex_waitv" => true,
-
-            // FIXME: Added in Linux 5.17
-            // https://github.com/torvalds/linux/commit/c6018b4b254971863bd0ad36bb5e7d0fa0f0ddb0
-            "SYS_set_mempolicy_home_node" => true,
-
-            // FIXME: Added in Linux 5.18
-            // https://github.com/torvalds/linux/commit/8b5413647262dda8d8d0e07e14ea1de9ac7cf0b2
-            "NFQA_PRIORITY" => true,
-
-            // FIXME: requires more recent kernel headers on CI
-            | "UINPUT_VERSION"
-            | "SW_MAX"
-            | "SW_CNT"
-                if ppc64 || riscv64 => true,
-
-            // FIXME: requires more recent kernel headers on CI
-            | "MFD_EXEC"
-            | "MFD_NOEXEC_SEAL"
-            | "SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV"
-                if sparc64 => true,
-
-            // FIXME: Not currently available in headers on ARM and musl.
-            "NETLINK_GET_STRICT_CHK" if arm || musl => true,
+            // Skip as this signal codes and trap reasons need newer headers
+            "TRAP_PERF" => true,
 
             // kernel constants not available in uclibc 1.0.34
-            | "EXTPROC"
+            "EXTPROC"
             | "IPPROTO_BEETPH"
             | "IPPROTO_MPLS"
             | "IPV6_HDRINCL"
@@ -4067,155 +4496,65 @@ fn test_linux(target: &str) {
             | "SHM_EXEC"
             | "UDP_GRO"
             | "UDP_SEGMENT"
-                if uclibc => true,
+                if uclibc =>
+            {
+                true
+            }
 
             // headers conflicts with linux/pidfd.h
             "PIDFD_NONBLOCK" => true,
+            // Linux >= 6.9
+            "PIDFD_THREAD"
+            | "PIDFD_SIGNAL_THREAD"
+            | "PIDFD_SIGNAL_THREAD_GROUP"
+            | "PIDFD_SIGNAL_PROCESS_GROUP" => true,
+            // Linux >= 6.11
+            "PIDFD_GET_CGROUP_NAMESPACE"
+            | "PIDFD_GET_IPC_NAMESPACE"
+            | "PIDFD_GET_MNT_NAMESPACE"
+            | "PIDFD_GET_NET_NAMESPACE"
+            | "PIDFD_GET_PID_NAMESPACE"
+            | "PIDFD_GET_PID_FOR_CHILDREN_NAMESPACE"
+            | "PIDFD_GET_TIME_NAMESPACE"
+            | "PIDFD_GET_TIME_FOR_CHILDREN_NAMESPACE"
+            | "PIDFD_GET_USER_NAMESPACE"
+            | "PIDFD_GET_UTS_NAMESPACE" => true,
+            // Linux >= 6.13
+            "PIDFD_GET_INFO"
+            | "PIDFD_INFO_PID"
+            | "PIDFD_INFO_CREDS"
+            | "PIDFD_INFO_CGROUPID"
+            | "PIDFD_INFO_SIZE_VER0" => true,
+            // Linux >= 6.15
+            "PIDFD_INFO_EXIT" | "PIDFD_SELF" | "PIDFD_SELF_PROCESS" => true,
 
             // is a private value for kernel usage normally
             "FUSE_SUPER_MAGIC" => true,
 
-            // linux 5.17 min
-            "PR_SET_VMA" | "PR_SET_VMA_ANON_NAME" => true,
+            // Not present in glibc
+            "PR_SME_VL_LEN_MAX" | "PR_SME_SET_VL_INHERIT" | "PR_SME_SET_VL_ONE_EXEC" if gnu => true,
 
-            // present in recent kernels only
-            "PR_SCHED_CORE" | "PR_SCHED_CORE_CREATE" | "PR_SCHED_CORE_GET" | "PR_SCHED_CORE_MAX" | "PR_SCHED_CORE_SCOPE_PROCESS_GROUP" | "PR_SCHED_CORE_SCOPE_THREAD" | "PR_SCHED_CORE_SCOPE_THREAD_GROUP" | "PR_SCHED_CORE_SHARE_FROM" | "PR_SCHED_CORE_SHARE_TO" => true,
-
-            // present in recent kernels only >= 5.13
-            "PR_PAC_SET_ENABLED_KEYS" | "PR_PAC_GET_ENABLED_KEYS" => true,
-            // present in recent kernels only >= 5.19
-            "PR_SME_SET_VL" | "PR_SME_GET_VL" | "PR_SME_VL_LEN_MAX" | "PR_SME_SET_VL_INHERIT" | "PR_SME_SET_VL_ONE_EXEC" => true,
-
-            // Added in Linux 5.14
-            "FUTEX_LOCK_PI2" => true,
-
-            // Added in  linux 6.1
-            "STATX_DIOALIGN"
-            | "CAN_RAW_XL_FRAMES"
-            | "CANXL_HDR_SIZE"
-            | "CANXL_MAX_DLC"
-            | "CANXL_MAX_DLC_MASK"
-            | "CANXL_MAX_DLEN"
-            | "CANXL_MAX_MTU"
-            | "CANXL_MIN_DLC"
-            | "CANXL_MIN_DLEN"
-            | "CANXL_MIN_MTU"
-            | "CANXL_MTU"
-            | "CANXL_PRIO_BITS"
-            | "CANXL_PRIO_MASK"
-            | "CANXL_SEC"
-            | "CANXL_XLF"
-             => true,
-
-            // FIXME: Parts of netfilter/nfnetlink*.h require more recent kernel headers:
-            | "RTNLGRP_MCTP_IFADDR" // linux v5.17+
-            | "RTNLGRP_TUNNEL" // linux v5.18+
-            | "RTNLGRP_STATS" // linux v5.18+
-                => true,
-
-            // FIXME: The below is no longer const in glibc 2.34:
+            // FIXME(linux): The below is no longer const in glibc 2.34:
             // https://github.com/bminor/glibc/commit/5d98a7dae955bafa6740c26eaba9c86060ae0344
-            | "PTHREAD_STACK_MIN"
-            | "SIGSTKSZ"
-            | "MINSIGSTKSZ"
-                if gnu => true,
+            "PTHREAD_STACK_MIN" | "SIGSTKSZ" | "MINSIGSTKSZ" if gnu => true,
 
-            // FIXME: Linux >= 5.16 changed its value:
-            // https://github.com/torvalds/linux/commit/42df6e1d221dddc0f2acf2be37e68d553ad65f96
-            "NF_NETDEV_NUMHOOKS" => true,
+            // value changed
+            "NF_NETDEV_NUMHOOKS" if sparc64 => true,
 
-            // FIXME: requires Linux >= 5.6:
-            | "RESOLVE_BENEATH"
-            | "RESOLVE_CACHED"
-            | "RESOLVE_IN_ROOT"
-            | "RESOLVE_NO_MAGICLINKS"
-            | "RESOLVE_NO_SYMLINKS"
-            | "RESOLVE_NO_XDEV" if musl => true,
-
-            // FIXME: requires Linux >= 5.4:
-            | "CAN_J1939"
-            | "CAN_NPROTO" if musl => true,
-
-            // FIXME: requires Linux >= 5.6
-            "GRND_INSECURE" if musl => true,
-
-            // FIXME: requires Linux >= 5.7:
-            "MREMAP_DONTUNMAP" if musl => true,
-
-            // FIXME: requires Linux >= v5.8
-            "IF_LINK_MODE_TESTING" if musl || sparc64 => true,
-
-            // FIXME: Requires more recent kernel headers (5.9 / 5.11):
-            | "CLOSE_RANGE_UNSHARE"
-            | "CLOSE_RANGE_CLOEXEC" if musl => true,
-
-            // FIXME: requires Linux >= 5.12:
-            "MPOL_F_NUMA_BALANCING" if musl => true,
-
-            // FIXME: Requires more recent kernel headers
-            | "NFNL_SUBSYS_COUNT" // bumped in v5.14
-            | "NFNL_SUBSYS_HOOK" // v5.14+
-            | "NFULA_VLAN" // v5.4+
-            | "NFULA_L2HDR" // v5.4+
-            | "NFULA_VLAN_PROTO" // v5.4+
-            | "NFULA_VLAN_TCI" // v5.4+
-            | "NFULA_VLAN_UNSPEC" // v5.4+
-            | "RTNLGRP_NEXTHOP" // linux v5.3+
-            | "RTNLGRP_BRVLAN" // linux v5.6+
-            if musl => true,
-
-            | "MADV_COLD"
-            | "MADV_PAGEOUT"
-            | "MADV_POPULATE_READ"
-            | "MADV_POPULATE_WRITE"
-            if musl => true,
+            // DIFF(main): fixed in 1.0 with e9abac9ac2
             "CLONE_CLEAR_SIGHAND" | "CLONE_INTO_CGROUP" => true,
 
-            // kernel 6.1 minimum
-            "MADV_COLLAPSE" => true,
+            // kernel 6.9 minimum
+            "RWF_NOAPPEND" => true,
 
-            // kernel 6.2 minimum
-            "TUN_F_USO4" | "TUN_F_USO6" | "IFF_NO_CARRIER" => true,
+            // kernel 6.11 minimum
+            "RWF_ATOMIC" => true,
 
-            // FIXME: Requires more recent kernel headers
-            | "IFLA_PARENT_DEV_NAME"     // linux v5.13+
-            | "IFLA_PARENT_DEV_BUS_NAME" // linux v5.13+
-            | "IFLA_GRO_MAX_SIZE"        // linux v5.16+
-            | "IFLA_TSO_MAX_SIZE"        // linux v5.18+
-            | "IFLA_TSO_MAX_SEGS"        // linux v5.18+
-            | "IFLA_ALLMULTI"            // linux v6.0+
-            | "MADV_DONTNEED_LOCKED"     // linux v5.18+
-                => true,
-            "SCTP_FUTURE_ASSOC" | "SCTP_CURRENT_ASSOC" | "SCTP_ALL_ASSOC" | "SCTP_PEER_ADDR_THLDS_V2" => true, // linux 5.5+
+            // kernel 6.14 minimum
+            "RWF_DONTCACHE" => true,
 
-            // FIXME: Requires more recent kernel headers
-            "HWTSTAMP_TX_ONESTEP_P2P" if musl => true, // linux v5.6+
-
-            // kernel 6.5 minimum
-            "MOVE_MOUNT_BENEATH" => true,
-            // FIXME: Requires linux 6.1
-            "ALG_SET_KEY_BY_KEY_SERIAL" | "ALG_SET_DRBG_ENTROPY" => true,
-
-            // FIXME: Requires more recent kernel headers
-            | "FAN_FS_ERROR"                      // linux v5.16+
-            | "FAN_RENAME"                        // linux v5.17+
-            | "FAN_REPORT_TARGET_FID"             // linux v5.17+
-            | "FAN_REPORT_DFID_NAME_TARGET"       // linux v5.17+
-            | "FAN_MARK_EVICTABLE"                // linux v5.19+
-            | "FAN_MARK_IGNORE"                   // linux v6.0+
-            | "FAN_MARK_IGNORE_SURV"              // linux v6.0+
-            | "FAN_EVENT_INFO_TYPE_ERROR"         // linux v5.16+
-            | "FAN_EVENT_INFO_TYPE_OLD_DFID_NAME" // linux v5.17+
-            | "FAN_EVENT_INFO_TYPE_NEW_DFID_NAME" // linux v5.17+
-            | "FAN_RESPONSE_INFO_NONE"            // linux v5.16+
-            | "FAN_RESPONSE_INFO_AUDIT_RULE"      // linux v5.16+
-            | "FAN_INFO"                          // linux v5.16+
-                => true,
-
-            // FIXME: Requires linux 5.15+
-            "FAN_REPORT_PIDFD" if musl => true,
-
-            // FIXME: Requires linux 5.9+
+            // musl doesn't use <linux/fanotify.h> in <sys/fanotify.h>
+            "FAN_REPORT_PIDFD"
             | "FAN_REPORT_DIR_FID"
             | "FAN_REPORT_NAME"
             | "FAN_REPORT_DFID_NAME"
@@ -4224,118 +4563,124 @@ fn test_linux(target: &str) {
             | "FAN_EVENT_INFO_TYPE_PIDFD"
             | "FAN_NOPIDFD"
             | "FAN_EPIDFD"
-            if musl => true,
-
-            // FIXME: Requires linux 6.5
-            "NFT_MSG_MAX" => true,
-
-            // FIXME: Requires >= 5.1 kernel headers.
-            // Everything that uses install-musl.sh has 4.19 kernel headers.
-            "TLS_1_3_VERSION"
-            | "TLS_1_3_VERSION_MAJOR"
-            | "TLS_1_3_VERSION_MINOR"
-            | "TLS_CIPHER_AES_GCM_256"
-            | "TLS_CIPHER_AES_GCM_256_IV_SIZE"
-            | "TLS_CIPHER_AES_GCM_256_KEY_SIZE"
-            | "TLS_CIPHER_AES_GCM_256_SALT_SIZE"
-            | "TLS_CIPHER_AES_GCM_256_TAG_SIZE"
-            | "TLS_CIPHER_AES_GCM_256_REC_SEQ_SIZE"
-                if (aarch64 || arm || i686 || s390x || x86_64) && musl =>
-            {
-                true
-            }
-
-            // FIXME: Requires >= 5.11 kernel headers.
-            // Everything that uses install-musl.sh has 4.19 kernel headers.
-            "TLS_CIPHER_CHACHA20_POLY1305"
-            | "TLS_CIPHER_CHACHA20_POLY1305_IV_SIZE"
-            | "TLS_CIPHER_CHACHA20_POLY1305_KEY_SIZE"
-            | "TLS_CIPHER_CHACHA20_POLY1305_SALT_SIZE"
-            | "TLS_CIPHER_CHACHA20_POLY1305_TAG_SIZE"
-            | "TLS_CIPHER_CHACHA20_POLY1305_REC_SEQ_SIZE"
-                if (aarch64 || arm || i686 || s390x || x86_64) && musl =>
-            {
-                true
-            }
-
-            // FIXME: Requires >= 5.3 kernel headers.
-            // Everything that uses install-musl.sh has 4.19 kernel headers.
-            "XDP_OPTIONS_ZEROCOPY" | "XDP_OPTIONS"
                 if musl =>
             {
                 true
             }
 
-            // FIXME: Requires >= 5.4 kernel headers.
-            // Everything that uses install-musl.sh has 4.19 kernel headers.
-            "XSK_UNALIGNED_BUF_OFFSET_SHIFT"
-            | "XSK_UNALIGNED_BUF_ADDR_MASK"
-            | "XDP_UMEM_UNALIGNED_CHUNK_FLAG"
-            | "XDP_RING_NEED_WAKEUP"
-            | "XDP_USE_NEED_WAKEUP"
-                if musl =>
+            // FIXME(linux32): Requires >= 6.6 kernel headers.
+            "XDP_USE_SG" | "XDP_PKT_CONTD" if pointer_width == 32 => true,
+
+            // FIXME(linux): Missing only on this platform for some reason
+            "PR_MDWE_NO_INHERIT" if gnueabihf => true,
+
+            // FIXME(musl): Not yet in musl
+            // FIXME(linux32): Requires >= 6.8 kernel headers.
+            "XDP_UMEM_TX_SW_CSUM"
+            | "XDP_TXMD_FLAGS_TIMESTAMP"
+            | "XDP_TXMD_FLAGS_CHECKSUM"
+            | "XDP_TX_METADATA"
+                if musl || pointer_width == 32 =>
             {
                 true
             }
 
-            // FIXME: Requires >= 6.6 kernel headers.
-            "XDP_USE_SG"
-            | "XDP_PKT_CONTD"
-                =>
-            {
+            // FIXME(linux): Requires >= 6.11 kernel headers.
+            "XDP_UMEM_TX_METADATA_LEN" => true,
+
+            // FIXME(linux): Requires >= 6.11 kernel headers.
+            "NS_GET_MNTNS_ID"
+            | "NS_GET_PID_FROM_PIDNS"
+            | "NS_GET_TGID_FROM_PIDNS"
+            | "NS_GET_PID_IN_PIDNS"
+            | "NS_GET_TGID_IN_PIDNS" => true,
+            // FIXME(linux): Requires >= 6.12 kernel headers.
+            "MNT_NS_INFO_SIZE_VER0" | "NS_MNT_GET_INFO" | "NS_MNT_GET_NEXT" | "NS_MNT_GET_PREV" => {
                 true
             }
 
-            // FIXME: Requires >= 6.6 kernel headers.
-            "SYS_fchmodat2" => true,
-
-            // FIXME: Requires >= 6.10 kernel headers.
+            // FIXME(linux): Requires >= 6.10 kernel headers.
             "SYS_mseal" => true,
 
-            // FIXME: seems to not be available all the time (from <include/linux/sched.h>:
-            "PF_VCPU"
-            | "PF_IDLE"
-            | "PF_EXITING"
-            | "PF_POSTCOREDUMP"
-            | "PF_IO_WORKER"
-            | "PF_WQ_WORKER"
-            | "PF_FORKNOEXEC"
-            | "PF_MCE_PROCESS"
-            | "PF_SUPERPRIV"
-            | "PF_DUMPCORE"
-            | "PF_SIGNALED"
-            | "PF_MEMALLOC"
-            | "PF_NPROC_EXCEEDED"
-            | "PF_USED_MATH"
-            | "PF_USER_WORKER"
-            | "PF_NOFREEZE"
-            | "PF_KSWAPD"
-            | "PF_MEMALLOC_NOFS"
-            | "PF_MEMALLOC_NOIO"
-            | "PF_LOCAL_THROTTLE"
-            | "PF_KTHREAD"
-            | "PF_RANDOMIZE"
-            | "PF_NO_SETAFFINITY"
-            | "PF_MCE_EARLY"
-            | "PF_MEMALLOC_PIN" => true,
+            // FIXME(linux): seems to not be available all the time (from <include/linux/sched.h>:
+            "PF_VCPU" | "PF_IDLE" | "PF_EXITING" | "PF_POSTCOREDUMP" | "PF_IO_WORKER"
+            | "PF_WQ_WORKER" | "PF_FORKNOEXEC" | "PF_MCE_PROCESS" | "PF_SUPERPRIV"
+            | "PF_DUMPCORE" | "PF_SIGNALED" | "PF_MEMALLOC" | "PF_NPROC_EXCEEDED"
+            | "PF_USED_MATH" | "PF_USER_WORKER" | "PF_NOFREEZE" | "PF_KSWAPD"
+            | "PF_MEMALLOC_NOFS" | "PF_MEMALLOC_NOIO" | "PF_LOCAL_THROTTLE" | "PF_KTHREAD"
+            | "PF_RANDOMIZE" | "PF_NO_SETAFFINITY" | "PF_MCE_EARLY" | "PF_MEMALLOC_PIN"
+            | "PF_BLOCK_TS" | "PF_SUSPEND_TASK" => true,
 
-            "SCHED_FLAG_KEEP_POLICY"
-            | "SCHED_FLAG_KEEP_PARAMS"
-            | "SCHED_FLAG_UTIL_CLAMP_MIN"
-            | "SCHED_FLAG_UTIL_CLAMP_MAX"
-            | "SCHED_FLAG_KEEP_ALL"
-            | "SCHED_FLAG_UTIL_CLAMP"
-            | "SCHED_FLAG_ALL" if musl => true, // Needs more recent linux headers.
+            // FIXME(linux): Requires >= 6.9 kernel headers.
+            "EPIOCSPARAMS" | "EPIOCGPARAMS" => true,
 
-            // FIXME: Requires >= 6.9 kernel headers.
-            "EPIOCSPARAMS"
-            | "EPIOCGPARAMS" => true,
+            // FIXME(linux): Requires >= 6.11 kernel headers.
+            "MAP_DROPPABLE" => true,
+
+            // FIXME(linux): Requires >= 6.12 kernel headers.
+            "SOF_TIMESTAMPING_OPT_RX_FILTER" => true,
+
+            // FIXME(linux): Requires >= 6.12 kernel headers.
+            "SO_DEVMEM_LINEAR" | "SO_DEVMEM_DMABUF" | "SO_DEVMEM_DONTNEED"
+            | "SCM_DEVMEM_LINEAR" | "SCM_DEVMEM_DMABUF" => true,
+
+            // FIXME(linux): Requires >= 6.4 kernel headers.
+            "PTRACE_SET_SYSCALL_USER_DISPATCH_CONFIG"
+            | "PTRACE_GET_SYSCALL_USER_DISPATCH_CONFIG" => true,
+
+            // FIXME(linux): Requires >= 6.14 kernel headers.
+            "SECBIT_EXEC_DENY_INTERACTIVE"
+            | "SECBIT_EXEC_DENY_INTERACTIVE_LOCKED"
+            | "SECBIT_EXEC_RESTRICT_FILE"
+            | "SECBIT_EXEC_RESTRICT_FILE_LOCKED"
+            | "SECURE_ALL_UNPRIVILEGED" => true,
+
+            // FIXME(linux): Value changed in 6.14
+            "SECURE_ALL_BITS" | "SECURE_ALL_LOCKS" => true,
+
+            // FIXME(linux): Requires >= 6.9 kernel headers.
+            "AT_HWCAP3" | "AT_HWCAP4" => true,
+
+            // Linux 6.14
+            "AT_EXECVE_CHECK" => true,
+
+            // FIXME(linux):  Requires >= 6.16 kernel headers.
+            "PTRACE_SET_SYSCALL_INFO" => true,
+
+            // FIXME(linux): Requires >= 6.13 kernel headers.
+            "AT_HANDLE_CONNECTABLE" => true,
+
+            // FIXME(linux): Requires >= 6.12 kernel headers.
+            "AT_HANDLE_MNT_ID_UNIQUE" => true,
+
+            // FIXME(musl): This value is not yet in musl.
+            // eabihf targets are tested using an older version of glibc
+            "AT_HANDLE_FID" if musl || eabihf => true,
 
             _ => false,
         }
     });
 
-    cfg.skip_fn(move |name| {
+    let c_enums = [
+        "membarrier_cmd",
+        "pid_type",
+        "proc_cn_event",
+        "proc_cn_mcast_op",
+        "tpacket_versions",
+    ];
+    cfg.alias_is_c_enum(move |e| c_enums.contains(&e));
+
+    // FIXME(libc): `pid_type` and `proc_cn_event` is hidden.
+    cfg.skip_c_enum(|e| e == "pid_type" || e == "proc_cn_event");
+
+    cfg.skip_signededness(move |c| match c {
+        // FIXME(1.0): uses the enum default signedness
+        "membarrier_cmd" => true,
+        _ => false,
+    });
+
+    cfg.skip_fn(move |function| {
+        let name = function.ident();
         // skip those that are manually verified
         match name {
             // FIXME: https://github.com/rust-lang/libc/issues/1272
@@ -4359,7 +4704,7 @@ fn test_linux(target: &str) {
             // test the XSI version below.
             "strerror_r" => true,
 
-            // FIXME: Our API is unsound. The Rust API allows aliasing
+            // FIXME(linux): Our API is unsound. The Rust API allows aliasing
             // pointers, but the C API requires pointers not to alias.
             // We should probably be at least using `&`/`&mut` here, see:
             // https://github.com/gnzlbg/ctest/issues/68
@@ -4370,10 +4715,10 @@ fn test_linux(target: &str) {
             // Needs glibc 2.35 or later.
             "posix_spawn_file_actions_addtcsetpgrp_np" if gnu && sparc64 => true,
 
-            // FIXME: Deprecated since glibc 2.30. Remove fn once upstream does.
+            // FIXME(linux): Deprecated since glibc 2.30. Remove fn once upstream does.
             "sysctl" if gnu => true,
 
-            // FIXME: It now takes c_void instead of timezone since glibc 2.31.
+            // FIXME(linux): It now takes c_void instead of timezone since glibc 2.31.
             "gettimeofday" if gnu => true,
 
             // These are all implemented as static inline functions in uclibc, so
@@ -4401,19 +4746,21 @@ fn test_linux(target: &str) {
             // assume it's a int instead.
             "getnameinfo" if uclibc => true,
 
-            // FIXME: This needs musl 1.2.2 or later.
-            "gettid" if musl => true,
+            // FIXME(musl): This needs musl 1.2.2 or later, which is newer than what we test with
+            // on CI.
+            "gettid" | "reallocarray" if musl => true,
+            // Needs musl 1.2.3 or later.
+            "pthread_getname_np" if musl => true,
+            // Added in musl 1.2.5
+            "preadv2" | "pwritev2" if musl => true,
+            // FIXME(musl): Supported in new musl but we don't have a new enough version in CI.
+            "statx" if musl => true,
 
             // Needs glibc 2.33 or later.
             "mallinfo2" => true,
 
-            "reallocarray" if musl => true,
-
             // Not defined in uclibc as of 1.0.34
             "gettid" if uclibc => true,
-
-            // Needs musl 1.2.3 or later.
-            "pthread_getname_np" if musl => true,
 
             // pthread_sigqueue uses sigval, which was initially declared
             // as a struct but should be defined as a union. However due
@@ -4437,109 +4784,146 @@ fn test_linux(target: &str) {
             "posix_basename" if gnu => true,
             "gnu_basename" if gnu => true,
 
-            // FIXME: function pointers changed since Ubuntu 23.10
+            // FIXME(linux): function pointers changed since Ubuntu 23.10
             "strtol" | "strtoll" | "strtoul" | "strtoull" | "fscanf" | "scanf" | "sscanf" => true,
 
-            // Added in musl 1.2.5
-            "preadv2" | "pwritev2" if musl => true,
-
             _ => false,
         }
     });
 
-    cfg.skip_field_type(move |struct_, field| {
-        // This is a weird union, don't check the type.
-        (struct_ == "ifaddrs" && field == "ifa_ifu") ||
-        // sighandler_t type is super weird
-        (struct_ == "sigaction" && field == "sa_sigaction") ||
-        // __timeval type is a patch which doesn't exist in glibc
-        (struct_ == "utmpx" && field == "ut_tv") ||
-        // sigval is actually a union, but we pretend it's a struct
-        (struct_ == "sigevent" && field == "sigev_value") ||
-        // this one is an anonymous union
-        (struct_ == "ff_effect" && field == "u") ||
-        // `__exit_status` type is a patch which is absent in musl
-        (struct_ == "utmpx" && field == "ut_exit" && musl) ||
-        // `can_addr` is an anonymous union
-        (struct_ == "sockaddr_can" && field == "can_addr")
-    });
-
-    cfg.volatile_item(|i| {
-        use ctest::VolatileItemKind::*;
-        match i {
-            // aio_buf is a volatile void** but since we cannot express that in
-            // Rust types, we have to explicitly tell the checker about it here:
-            StructField(ref n, ref f) if n == "aiocb" && f == "aio_buf" => true,
+    cfg.skip_struct_field_type(move |union_, field| {
+        match (union_.ident(), field.ident()) {
+            // This is a weird union, don't check the type.
+            ("ifaddrs", "ifa_ifu") => true,
+            // sighandler_t type is super weird
+            ("sigaction", "sa_sigaction") => true,
+            // __timeval type is a patch which doesn't exist in glibc
+            ("utmpx", "ut_tv") => true,
+            // sigval is actually a union, but we pretend it's a struct
+            ("sigevent", "sigev_value") => true,
+            // this one is an anonymous union
+            ("ff_effect", "u") => true,
+            // `__exit_status` type is a patch which is absent in musl
+            ("utmpx", "ut_exit") if musl => true,
+            // `can_addr` is an anonymous union
+            ("sockaddr_can", "can_addr") => true,
+            // `anonymous_1` is an anonymous union
+            ("ptp_perout_request", "anonymous_1") => true,
+            // `anonymous_2` is an anonymous union
+            ("ptp_perout_request", "anonymous_2") => true,
+            // FIXME(linux): `adjust_phase` requires >= 5.7 kernel headers
+            // FIXME(linux): `max_phase_adj` requires >= 5.19 kernel headers
+            // the rsv field shrunk when those fields got added, so is omitted too
+            ("ptp_clock_caps", "adjust_phase" | "max_phase_adj" | "rsv")
+                if (loongarch64 || sparc64) =>
+            {
+                true
+            }
             _ => false,
         }
     });
 
-    cfg.skip_field(move |struct_, field| {
-        // this is actually a union on linux, so we can't represent it well and
-        // just insert some padding.
-        (struct_ == "siginfo_t" && field == "_pad") ||
-        // musl names this __dummy1 but it's still there
-        (musl && struct_ == "glob_t" && field == "gl_flags") ||
-        // musl seems to define this as an *anonymous* bitfield
-        (musl && struct_ == "statvfs" && field == "__f_unused") ||
-        // sigev_notify_thread_id is actually part of a sigev_un union
-        (struct_ == "sigevent" && field == "sigev_notify_thread_id") ||
-        // signalfd had SIGSYS fields added in Linux 4.18, but no libc release
-        // has them yet.
-        (struct_ == "signalfd_siginfo" && (field == "ssi_addr_lsb" ||
-                                           field == "_pad2" ||
-                                           field == "ssi_syscall" ||
-                                           field == "ssi_call_addr" ||
-                                           field == "ssi_arch")) ||
-        // FIXME: After musl 1.1.24, it have only one field `sched_priority`,
-        // while other fields become reserved.
-        (struct_ == "sched_param" && [
-            "sched_ss_low_priority",
-            "sched_ss_repl_period",
-            "sched_ss_init_budget",
-            "sched_ss_max_repl",
-        ].contains(&field) && musl) ||
-        // FIXME: After musl 1.1.24, the type becomes `int` instead of `unsigned short`.
-        (struct_ == "ipc_perm" && field == "__seq" && aarch64_musl) ||
-        // glibc uses unnamed fields here and Rust doesn't support that yet
-        (struct_ == "timex" && field.starts_with("__unused")) ||
-        // FIXME: It now takes mode_t since glibc 2.31 on some targets.
-        (struct_ == "ipc_perm" && field == "mode"
-            && ((x86_64 || i686 || arm || riscv64) && gnu || x86_64_gnux32)
-        ) ||
-        // the `u` field is in fact an anonymous union
-        (gnu && struct_ == "ptrace_syscall_info" && (field == "u" || field == "pad")) ||
-        // the vregs field is a `__uint128_t` C's type.
-        (struct_ == "user_fpsimd_struct" && field == "vregs") ||
-        // Linux >= 5.11 tweaked the `svm_zero` field of the `sockaddr_vm` struct.
-        // https://github.com/torvalds/linux/commit/dc8eeef73b63ed8988224ba6b5ed19a615163a7f
-        (struct_ == "sockaddr_vm" && field == "svm_zero") ||
-        // the `ifr_ifru` field is an anonymous union
-        (struct_ == "ifreq" && field == "ifr_ifru") ||
-        // the `ifc_ifcu` field is an anonymous union
-        (struct_ == "ifconf" && field == "ifc_ifcu") ||
-        // glibc uses a single array `uregs` instead of individual fields.
-        (struct_ == "user_regs" && arm) ||
-        // the `ifr_ifrn` field is an anonymous union
-        (struct_ == "iwreq" && field == "ifr_ifrn") ||
-        // the `key` field is a zero-sized array
-        (struct_ == "iw_encode_ext" && field == "key") ||
-        // the `tcpi_snd_rcv_wscale` map two bitfield fields stored in a u8
-        (struct_ == "tcp_info" && field == "tcpi_snd_rcv_wscale") ||
-        // the `tcpi_delivery_rate_app_limited` field is a bitfield on musl
-        (musl && struct_ == "tcp_info" && field == "tcpi_delivery_rate_app_limited") ||
-        // the `tcpi_fast_open_client_fail` field is a bitfield on musl
-        (musl && struct_ == "tcp_info" && field == "tcpi_fast_open_client_fail") ||
-        // either fsid_t or int[2] type
-        (struct_ == "fanotify_event_info_fid" && field == "fsid") ||
-        // `handle` is a VLA
-        (struct_ == "fanotify_event_info_fid" && field == "handle")
+    cfg.volatile_struct_field(|s, f| s.ident() == "aiocb" && f.ident() == "aio_buf");
+
+    cfg.skip_struct_field(move |struct_, field| {
+        match (struct_.ident(), field.ident()) {
+            // this is actually a union on linux, so we can't represent it well and
+            // just insert some padding.
+            ("siginfo_t", "_pad") => true,
+            // musl names this __dummy1 but it's still there
+            ("glob_t", "gl_flags") if musl => true,
+            // musl seems to define this as an *anonymous* bitfield
+            ("statvfs", "__f_unused") if musl => true,
+            // sigev_notify_thread_id is actually part of a sigev_un union
+            ("sigevent", "sigev_notify_thread_id") => true,
+            // signalfd had SIGSYS fields added in Linux 4.18, but no libc release
+            // has them yet.
+            (
+                "signalfd_siginfo",
+                "ssi_addr_lsb" | "_pad2" | "ssi_syscall" | "ssi_call_addr" | "ssi_arch",
+            ) => true,
+            // FIXME(musl): After musl 1.1.24, it have only one field `sched_priority`,
+            // while other fields become reserved.
+            (
+                "sched_param",
+                "sched_ss_low_priority"
+                | "sched_ss_repl_period"
+                | "sched_ss_init_budget"
+                | "sched_ss_max_repl",
+            ) if musl => true,
+            // After musl 1.1.24, the type becomes `int` instead of `unsigned short`.
+            ("ipc_perm", "__seq") if old_musl && aarch64 => true,
+            // glibc uses unnamed fields here and Rust doesn't support that yet
+            ("timex", f) if f.starts_with("__unused") => true,
+            // // FIXME(linux): It now takes mode_t since glibc 2.31 on some targets.
+            ("ipc_perm", "mode")
+                if ((x86_64 || i686 || arm || riscv64) && gnu || x86_64_gnux32) =>
+            {
+                true
+            }
+            // the `u` field is in fact an anonymous union
+            ("ptrace_syscall_info", "u" | "pad") if gnu => true,
+            // the vregs field is a `__uint128_t` C's type.
+            ("user_fpsimd_struct", "vregs") => true,
+            // Linux >= 5.11 tweaked the `svm_zero` field of the `sockaddr_vm` struct.
+            // https://github.com/torvalds/linux/commit/dc8eeef73b63ed8988224ba6b5ed19a615163a7f
+            ("sockaddr_vm", "svm_zero") => true,
+            // Linux >= 5.11 had added the svm_flags field to the `sockaddr_vm` struct.
+            ("sockaddr_vm", "svm_flags") => true,
+            // the `ifr_ifru` field is an anonymous union
+            ("ifreq", "ifr_ifru") => true,
+            // the `ifc_ifcu` field is an anonymous union
+            ("ifconf", "ifc_ifcu") => true,
+            // glibc uses a single array `uregs` instead of individual fields.
+            ("user_regs", _) if arm => true,
+            // the `ifr_ifrn` field is an anonymous union
+            ("iwreq", "ifr_ifrn") => true,
+            // the `key` field is a zero-sized array
+            ("iw_encode_ext", "key") => true,
+            // the `tcpi_snd_rcv_wscale` map two bitfield fields stored in a u8
+            ("tcp_info", "tcpi_snd_rcv_wscale") => true,
+            // the `tcpi_delivery_fastopen_bitfields` map two bitfield fields stored in a u8
+            ("tcp_info", "tcpi_delivery_fastopen_bitfields") if musl => true,
+            // either fsid_t or int[2] type
+            ("fanotify_event_info_fid", "fsid") => true,
+            // `handle` is a flexible array member
+            ("fanotify_event_info_fid", "handle") => true,
+            // `anonymous_1` is an anonymous union
+            ("ptp_perout_request", "anonymous_1") => true,
+            // `anonymous_2` is an anonymous union
+            ("ptp_perout_request", "anonymous_2") => true,
+            // FIXME(linux): `adjust_phase` requires >= 5.7 kernel headers
+            // FIXME(linux): `max_phase_adj` requires >= 5.19 kernel headers
+            // the rsv field shrunk when those fields got added, so is omitted too
+            ("ptp_clock_caps", "adjust_phase" | "max_phase_adj" | "rsv")
+                if loongarch64 || sparc64 =>
+            {
+                true
+            }
+            // invalid application of 'sizeof' to incomplete type 'long unsigned int[]'
+            ("mcontext_t", "__extcontext") if musl && loongarch64 => true,
+            // FIXME(#4121): a new field was added from `f_spare`
+            ("statvfs", "__f_spare") => true,
+            ("statvfs64", "__f_spare") => true,
+            // the `xsk_tx_metadata_union` field is an anonymous union
+            ("xsk_tx_metadata", "xsk_tx_metadata_union") => true,
+            // After musl 1.2.0, the type becomes `int` instead of `long`.
+            ("utmpx", "ut_session") if musl => true,
+            // `frames` is a flexible array member
+            ("bcm_msg_head", "frames") => true,
+            // FAM
+            ("af_alg_iv", "iv") => true,
+            ("file_handle", "f_handle") if musl => true,
+            // FIXME(ctest): ctest does not translate the rust code which computes the padding size
+            ("pthread_cond_t", "__padding") if l4re => true,
+            _ => false,
+        }
     });
 
     cfg.skip_roundtrip(move |s| match s {
-        // FIXME:
+        // FIXME(1.0):
         "mcontext_t" if s390x => true,
-        // FIXME: This is actually a union.
+        // FIXME(union): This is actually a union.
         "fpreg_t" if s390x => true,
 
         // The test doesn't work on some env:
@@ -4566,22 +4950,62 @@ fn test_linux(target: &str) {
             true
         }
 
-        // The `inotify_event` and `cmsghdr` types contain Flexible Array Member fields (the
-        // `name` and `data` fields respectively) which have unspecified calling convention.
-        // The roundtripping tests deliberately pass the structs by value to check "by value"
-        // layout consistency, but this would be UB for the these types.
+        // The following types contain Flexible Array Member fields which have unspecified calling
+        // convention. The roundtripping tests deliberately pass the structs by value to check "by
+        // value" layout consistency, but this would be UB for the these types.
         "inotify_event" => true,
+        "fanotify_event_info_fid" => true,
         "cmsghdr" => true,
+        "bcm_msg_head" => true,
 
-        // FIXME: the call ABI of max_align_t is incorrect on these platforms:
+        // FIXME(linux): the call ABI of max_align_t is incorrect on these platforms:
         "max_align_t" if i686 || ppc64 => true,
 
         _ => false,
     });
 
-    cfg.generate("../src/lib.rs", "main.rs");
+    if gnu {
+        // old constants, so tests fail if glibc is too new
+        cfg.skip_const(|s| {
+            // grep -E -h '^B([0-9])*$' libc-test/semver/*
+            [
+                "EXTA", "EXTB", "B0", "B1000000", "B110", "B115200", "B1152000", "B1200", "B134",
+                "B14400", "B150", "B1500000", "B153600", "B1800", "B19200", "B200", "B2000000",
+                "B230400", "B2400", "B2500000", "B28800", "B300", "B3000000", "B307200",
+                "B3500000", "B38400", "B4000000", "B460800", "B4800", "B50", "B500000", "B57600",
+                "B576000", "B600", "B614400", "B7200", "B75", "B76800", "B921600", "B9600",
+            ]
+            .contains(&s.ident())
+        });
+        if mips || sparc {
+            cfg.skip_const(|s| s.ident() == "NCCS");
+        }
+        // old symbols, so tests fail if glibc is too new
+        // note: `skip_fn_ptrcheck` overrides the previous function
+        cfg.skip_fn_ptrcheck(move |s| {
+            let mut result = false;
+            result = result || s == "cfgetispeed";
+            result = result || s == "cfgetospeed";
+            result = result || s == "cfsetispeed";
+            result = result || s == "cfsetospeed";
+            result = result || s == "cfsetspeed";
+            if mips || sparc {
+                result = result || s == "tcgetattr";
+                result = result || s == "tcsetattr";
+            }
+            result
+        });
+        // old structs, so tests fail if glibc is too new
+        if mips || sparc {
+            cfg.skip_struct(|s| s.ident() == "termios");
+        }
+    }
 
-    test_linux_like_apis(target);
+    ctest::generate_test(&mut cfg, "../src/lib.rs", "ctest_output.rs").unwrap();
+
+    if !l4re {
+        test_linux_like_apis(target);
+    }
 }
 
 // This function tests APIs that are incompatible to test when other APIs
@@ -4590,163 +5014,140 @@ fn test_linux_like_apis(target: &str) {
     let gnu = target.contains("gnu");
     let musl = target.contains("musl") || target.contains("ohos");
     let linux = target.contains("linux");
+    let wali = target.contains("linux") && target.contains("wasm32");
     let emscripten = target.contains("emscripten");
     let android = target.contains("android");
     assert!(linux || android || emscripten);
 
+    let mut cfg = ctest_cfg();
     if linux || android || emscripten {
         // test strerror_r from the `string.h` header
-        let mut cfg = ctest_cfg();
-        cfg.skip_type(|_| true).skip_static(|_| true);
+        config_gnu_bits(target, &mut cfg);
 
-        headers! { cfg: "string.h" }
-        cfg.skip_fn(|f| match f {
-            "strerror_r" => false,
-            _ => true,
-        })
-        .skip_const(|_| true)
-        .skip_struct(|_| true);
-        cfg.generate("../src/lib.rs", "linux_strerror_r.rs");
+        cfg.header("string.h")
+            .skip_alias(|_| true)
+            .skip_static(|_| true)
+            .skip_const(|_| true)
+            .skip_struct(|_| true)
+            .skip_union(|_| true)
+            .skip_fn(|function| function.ident() != "strerror_r");
+
+        ctest::generate_test(&mut cfg, "../src/lib.rs", "linux_strerror_r.rs").unwrap();
     }
 
+    let mut cfg = ctest_cfg();
     if linux || android || emscripten {
         // test fcntl - see:
         // http://man7.org/linux/man-pages/man2/fcntl.2.html
-        let mut cfg = ctest_cfg();
+        let fnctl_constants = [
+            "F_CANCELLK",
+            "F_ADD_SEALS",
+            "F_GET_SEALS",
+            "F_SEAL_SEAL",
+            "F_SEAL_SHRINK",
+            "F_SEAL_GROW",
+            "F_SEAL_WRITE",
+        ];
+        cfg.skip_alias(|_| true)
+            .skip_static(|_| true)
+            .skip_struct(|_| true)
+            .skip_union(|_| true)
+            .skip_fn(|_| true)
+            .skip_const(move |constant| !fnctl_constants.contains(&constant.ident()));
 
+        config_gnu_bits(target, &mut cfg);
         if musl {
             cfg.header("fcntl.h");
         } else {
             cfg.header("linux/fcntl.h");
         }
 
-        cfg.skip_type(|_| true)
-            .skip_static(|_| true)
-            .skip_struct(|_| true)
-            .skip_fn(|_| true)
-            .skip_const(move |name| match name {
-                // test fcntl constants:
-                "F_CANCELLK" | "F_ADD_SEALS" | "F_GET_SEALS" | "F_SEAL_SEAL" | "F_SEAL_SHRINK"
-                | "F_SEAL_GROW" | "F_SEAL_WRITE" => false,
-                _ => true,
-            })
-            .type_name(move |ty, is_struct, is_union| match ty {
-                t if is_struct => format!("struct {}", t),
-                t if is_union => format!("union {}", t),
-                t => t.to_string(),
-            });
-
-        cfg.generate("../src/lib.rs", "linux_fcntl.rs");
+        ctest::generate_test(&mut cfg, "../src/lib.rs", "linux_fcntl.rs").unwrap();
     }
 
-    if linux || android {
+    let mut cfg = ctest_cfg();
+    if (linux && !wali) || android {
         // test termios
-        let mut cfg = ctest_cfg();
-        cfg.header("asm/termbits.h");
-        cfg.header("linux/termios.h");
-        cfg.skip_type(|_| true)
+        config_gnu_bits(target, &mut cfg);
+
+        let termios_constants = [
+            "BOTHER", "IBSHIFT", "TCGETS2", "TCSETS2", "TCSETSW2", "TCSETSF2",
+        ];
+        cfg.header("asm/termbits.h")
+            .header("linux/termios.h")
+            .skip_alias(|_| true)
             .skip_static(|_| true)
             .skip_fn(|_| true)
-            .skip_const(|c| match c {
-                "BOTHER" | "IBSHIFT" => false,
-                "TCGETS2" | "TCSETS2" | "TCSETSW2" | "TCSETSF2" => false,
-                _ => true,
-            })
-            .skip_struct(|s| s != "termios2")
-            .type_name(move |ty, is_struct, is_union| match ty {
-                "Ioctl" if gnu => "unsigned long".to_string(),
-                "Ioctl" => "int".to_string(),
-                t if is_struct => format!("struct {}", t),
-                t if is_union => format!("union {}", t),
-                t => t.to_string(),
+            .skip_const(move |constant| !termios_constants.contains(&constant.ident()))
+            .skip_union(|_| true)
+            .skip_struct(|s| s.ident() != "termios2")
+            .rename_type(move |ty| match ty {
+                "Ioctl" if gnu => Some("unsigned long".to_string()),
+                "Ioctl" => Some("int".to_string()),
+                _ => None,
             });
-        cfg.generate("../src/lib.rs", "linux_termios.rs");
+
+        ctest::generate_test(&mut cfg, "../src/lib.rs", "linux_termios.rs").unwrap();
     }
 
+    let mut cfg = ctest_cfg();
     if linux || android {
         // test IPV6_ constants:
-        let mut cfg = ctest_cfg();
-        headers! {
-            cfg:
-            "linux/in6.h"
-        }
-        cfg.skip_type(|_| true)
+        let ipv6_constants = [
+            "IPV6_FLOWINFO",
+            "IPV6_FLOWLABEL_MGR",
+            "IPV6_FLOWINFO_SEND",
+            "IPV6_FLOWINFO_FLOWLABEL",
+            "IPV6_FLOWINFO_PRIORITY",
+        ];
+        cfg.skip_alias(|_| true)
             .skip_static(|_| true)
             .skip_fn(|_| true)
-            .skip_const(|_| true)
             .skip_struct(|_| true)
-            .skip_const(move |name| match name {
-                "IPV6_FLOWINFO"
-                | "IPV6_FLOWLABEL_MGR"
-                | "IPV6_FLOWINFO_SEND"
-                | "IPV6_FLOWINFO_FLOWLABEL"
-                | "IPV6_FLOWINFO_PRIORITY" => false,
-                _ => true,
-            })
-            .type_name(move |ty, is_struct, is_union| match ty {
-                t if is_struct => format!("struct {}", t),
-                t if is_union => format!("union {}", t),
-                t => t.to_string(),
-            });
-        cfg.generate("../src/lib.rs", "linux_ipv6.rs");
+            .skip_union(|_| true)
+            .skip_const(move |constant| !ipv6_constants.contains(&constant.ident()));
+
+        config_gnu_bits(target, &mut cfg);
+        headers!(cfg, "linux/in6.h",);
+
+        ctest::generate_test(&mut cfg, "../src/lib.rs", "linux_ipv6.rs").unwrap();
     }
 
-    if linux || android {
+    let mut cfg = ctest_cfg();
+    if (linux && !wali) || android {
         // Test Elf64_Phdr and Elf32_Phdr
         // These types have a field called `p_type`, but including
         // "resolve.h" defines a `p_type` macro that expands to `__p_type`
         // making the tests for these fails when both are included.
-        let mut cfg = ctest_cfg();
-        cfg.header("elf.h");
-        cfg.skip_fn(|_| true)
+        let elf_structs = ["Elf64_Phdr", "Elf32_Phdr"];
+        cfg.header("elf.h")
+            .skip_fn(|_| true)
             .skip_static(|_| true)
             .skip_const(|_| true)
-            .type_name(move |ty, _is_struct, _is_union| ty.to_string())
-            .skip_struct(move |ty| match ty {
-                "Elf64_Phdr" | "Elf32_Phdr" => false,
-                _ => true,
-            })
-            .skip_type(move |ty| match ty {
-                "Elf64_Phdr" | "Elf32_Phdr" => false,
-                _ => true,
-            });
-        cfg.generate("../src/lib.rs", "linux_elf.rs");
+            .skip_union(|_| true)
+            .rename_struct_ty(move |ty| Some(ty.to_string()))
+            .skip_struct(move |struct_| !elf_structs.contains(&struct_.ident()))
+            .skip_alias(move |alias| !elf_structs.contains(&alias.ident()));
+
+        config_gnu_bits(target, &mut cfg);
+
+        ctest::generate_test(&mut cfg, "../src/lib.rs", "linux_elf.rs").unwrap();
     }
 
-    if linux || android {
+    if (linux && !wali) || android {
         // Test `ARPHRD_CAN`.
         let mut cfg = ctest_cfg();
-        cfg.header("linux/if_arp.h");
-        cfg.skip_fn(|_| true)
+        config_gnu_bits(target, &mut cfg);
+        cfg.header("linux/if_arp.h")
+            .skip_fn(|_| true)
             .skip_static(|_| true)
-            .skip_const(move |name| match name {
-                "ARPHRD_CAN" => false,
-                _ => true,
-            })
+            .skip_union(|_| true)
             .skip_struct(|_| true)
-            .skip_type(|_| true);
-        cfg.generate("../src/lib.rs", "linux_if_arp.rs");
-    }
-}
+            .skip_union(|_| true)
+            .skip_alias(|_| true)
+            .skip_const(move |constant| constant.ident() != "ARPHRD_CAN");
 
-fn which_freebsd() -> Option<i32> {
-    let output = std::process::Command::new("freebsd-version")
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-
-    let stdout = String::from_utf8(output.stdout).ok()?;
-
-    match &stdout {
-        s if s.starts_with("10") => Some(10),
-        s if s.starts_with("11") => Some(11),
-        s if s.starts_with("12") => Some(12),
-        s if s.starts_with("13") => Some(13),
-        s if s.starts_with("14") => Some(14),
-        s if s.starts_with("15") => Some(15),
-        _ => None,
+        ctest::generate_test(&mut cfg, "../src/lib.rs", "linux_if_arp.rs").unwrap();
     }
 }
 
@@ -4757,153 +5158,153 @@ fn test_haiku(target: &str) {
     cfg.flag("-Wno-deprecated-declarations");
     cfg.define("__USE_GNU", Some("1"));
     cfg.define("_GNU_SOURCE", None);
-    cfg.language(ctest::Lang::CXX);
+    cfg.language(ctest::Language::CXX);
 
     // POSIX API
-    headers! { cfg:
-               "alloca.h",
-               "arpa/inet.h",
-               "arpa/nameser.h",
-               "arpa/nameser_compat.h",
-               "assert.h",
-               "complex.h",
-               "ctype.h",
-               "dirent.h",
-               "div_t.h",
-               "dlfcn.h",
-               "endian.h",
-               "errno.h",
-               "fcntl.h",
-               "fenv.h",
-               "fnmatch.h",
-               "fts.h",
-               "ftw.h",
-               "getopt.h",
-               "glob.h",
-               "grp.h",
-               "inttypes.h",
-               "iovec.h",
-               "langinfo.h",
-               "libgen.h",
-               "libio.h",
-               "limits.h",
-               "locale.h",
-               "malloc.h",
-               "malloc_debug.h",
-               "math.h",
-               "memory.h",
-               "monetary.h",
-               "net/if.h",
-               "net/if_dl.h",
-               "net/if_media.h",
-               "net/if_tun.h",
-               "net/if_types.h",
-               "net/route.h",
-               "netdb.h",
-               "netinet/in.h",
-               "netinet/ip.h",
-               "netinet/ip6.h",
-               "netinet/ip_icmp.h",
-               "netinet/ip_var.h",
-               "netinet/tcp.h",
-               "netinet/udp.h",
-               "netinet6/in6.h",
-               "nl_types.h",
-               "null.h",
-               "poll.h",
-               "pthread.h",
-               "pwd.h",
-               "regex.h",
-               "resolv.h",
-               "sched.h",
-               "search.h",
-               "semaphore.h",
-               "setjmp.h",
-               "shadow.h",
-               "signal.h",
-               "size_t.h",
-               "spawn.h",
-               "stdint.h",
-               "stdio.h",
-               "stdlib.h",
-               "string.h",
-               "strings.h",
-               "sys/cdefs.h",
-               "sys/file.h",
-               "sys/ioctl.h",
-               "sys/ipc.h",
-               "sys/mman.h",
-               "sys/msg.h",
-               "sys/param.h",
-               "sys/poll.h",
-               "sys/resource.h",
-               "sys/select.h",
-               "sys/sem.h",
-               "sys/socket.h",
-               "sys/sockio.h",
-               "sys/stat.h",
-               "sys/statvfs.h",
-               "sys/time.h",
-               "sys/timeb.h",
-               "sys/times.h",
-               "sys/types.h",
-               "sys/uio.h",
-               "sys/un.h",
-               "sys/utsname.h",
-               "sys/wait.h",
-               "syslog.h",
-               "tar.h",
-               "termios.h",
-               "time.h",
-               "uchar.h",
-               "unistd.h",
-               "utime.h",
-               "utmpx.h",
-               "wchar.h",
-               "wchar_t.h",
-               "wctype.h"
-    }
+    headers!(
+        cfg,
+        "alloca.h",
+        "arpa/inet.h",
+        "arpa/nameser.h",
+        "arpa/nameser_compat.h",
+        "assert.h",
+        "complex.h",
+        "ctype.h",
+        "dirent.h",
+        "div_t.h",
+        "dlfcn.h",
+        "endian.h",
+        "errno.h",
+        "fcntl.h",
+        "fenv.h",
+        "fnmatch.h",
+        "fts.h",
+        "ftw.h",
+        "getopt.h",
+        "glob.h",
+        "grp.h",
+        "inttypes.h",
+        "iovec.h",
+        "langinfo.h",
+        "libgen.h",
+        "libio.h",
+        "limits.h",
+        "locale.h",
+        "malloc.h",
+        "malloc_debug.h",
+        "math.h",
+        "memory.h",
+        "monetary.h",
+        "net/if.h",
+        "net/if_dl.h",
+        "net/if_media.h",
+        "net/if_tun.h",
+        "net/if_types.h",
+        "net/route.h",
+        "netdb.h",
+        "netinet/in.h",
+        "netinet/ip.h",
+        "netinet/ip6.h",
+        "netinet/ip_icmp.h",
+        "netinet/ip_var.h",
+        "netinet/tcp.h",
+        "netinet/udp.h",
+        "netinet6/in6.h",
+        "nl_types.h",
+        "null.h",
+        "poll.h",
+        "pthread.h",
+        "pwd.h",
+        "regex.h",
+        "resolv.h",
+        "sched.h",
+        "search.h",
+        "semaphore.h",
+        "setjmp.h",
+        "shadow.h",
+        "signal.h",
+        "size_t.h",
+        "spawn.h",
+        "stdint.h",
+        "stdio.h",
+        "stdlib.h",
+        "string.h",
+        "strings.h",
+        "sys/cdefs.h",
+        "sys/file.h",
+        "sys/ioctl.h",
+        "sys/ipc.h",
+        "sys/mman.h",
+        "sys/msg.h",
+        "sys/param.h",
+        "sys/poll.h",
+        "sys/resource.h",
+        "sys/select.h",
+        "sys/sem.h",
+        "sys/socket.h",
+        "sys/sockio.h",
+        "sys/stat.h",
+        "sys/statvfs.h",
+        "sys/time.h",
+        "sys/timeb.h",
+        "sys/times.h",
+        "sys/types.h",
+        "sys/uio.h",
+        "sys/un.h",
+        "sys/utsname.h",
+        "sys/wait.h",
+        "syslog.h",
+        "tar.h",
+        "termios.h",
+        "time.h",
+        "uchar.h",
+        "unistd.h",
+        "utime.h",
+        "utmpx.h",
+        "wchar.h",
+        "wchar_t.h",
+        "wctype.h",
+    );
 
     // BSD Extensions
-    headers! { cfg:
-               "ifaddrs.h",
-               "libutil.h",
-               "link.h",
-               "pty.h",
-               "stdlib.h",
-               "stringlist.h",
-               "sys/link_elf.h",
-    }
+    headers!(
+        cfg,
+        "ifaddrs.h",
+        "libutil.h",
+        "link.h",
+        "pty.h",
+        "stdlib.h",
+        "stringlist.h",
+        "sys/link_elf.h",
+    );
 
     // Native API
-    headers! { cfg:
-               "kernel/OS.h",
-               "kernel/fs_attr.h",
-               "kernel/fs_index.h",
-               "kernel/fs_info.h",
-               "kernel/fs_query.h",
-               "kernel/fs_volume.h",
-               "kernel/image.h",
-               "kernel/scheduler.h",
-               "storage/FindDirectory.h",
-               "storage/StorageDefs.h",
-               "support/Errors.h",
-               "support/SupportDefs.h",
-               "support/TypeConstants.h"
-    }
+    headers!(
+        cfg,
+        "kernel/OS.h",
+        "kernel/fs_attr.h",
+        "kernel/fs_index.h",
+        "kernel/fs_info.h",
+        "kernel/fs_query.h",
+        "kernel/fs_volume.h",
+        "kernel/image.h",
+        "kernel/scheduler.h",
+        "storage/FindDirectory.h",
+        "storage/StorageDefs.h",
+        "support/Errors.h",
+        "support/SupportDefs.h",
+        "support/TypeConstants.h",
+    );
 
-    cfg.skip_struct(move |ty| {
-        if ty.starts_with("__c_anonymous_") {
-            return true;
-        }
-        match ty {
-            // FIXME: actually a union
+    cfg.skip_struct(move |struct_| {
+        match struct_.ident() {
+            // FIXME(union): actually a union
             "sigval" => true,
-            // FIXME: locale_t does not exist on Haiku
+            // FIXME(haiku): locale_t does not exist on Haiku
             "locale_t" => true,
-            // FIXME: rusage has a different layout on Haiku
+            // FIXME(haiku): rusage has a different layout on Haiku
             "rusage" => true,
-            // FIXME?: complains that rust aligns on 4 byte boundary, but
+            // FIXME(haiku): complains that rust aligns on 4 byte boundary, but
             //         Haiku does not align it at all.
             "in6_addr" => true,
             // The d_name attribute is an array of 1 on Haiku, with the
@@ -4926,9 +5327,9 @@ fn test_haiku(target: &str) {
         }
     });
 
-    cfg.skip_type(move |ty| {
-        match ty {
-            // FIXME: locale_t does not exist on Haiku
+    cfg.skip_alias(move |ty| {
+        match ty.ident() {
+            // FIXME(haiku): locale_t does not exist on Haiku
             "locale_t" => true,
             // These cause errors, to be reviewed in the future
             "sighandler_t" => true,
@@ -4940,12 +5341,12 @@ fn test_haiku(target: &str) {
         }
     });
 
-    cfg.skip_fn(move |name| {
+    cfg.skip_fn(move |func| {
         // skip those that are manually verified
-        match name {
-            // FIXME: https://github.com/rust-lang/libc/issues/1272
+        match func.ident() {
+            // FIXME(haiku): https://github.com/rust-lang/libc/issues/1272
             "execv" | "execve" | "execvp" | "execvpe" => true,
-            // FIXME: does not exist on haiku
+            // FIXME(haiku): does not exist on haiku
             "open_wmemstream" => true,
             "mlockall" | "munlockall" => true,
             "tcgetsid" => true,
@@ -4967,9 +5368,9 @@ fn test_haiku(target: &str) {
         }
     });
 
-    cfg.skip_const(move |name| {
-        match name {
-            // FIXME: these constants do not exist on Haiku
+    cfg.skip_const(move |constant| {
+        match constant.ident() {
+            // FIXME(haiku): these constants do not exist on Haiku
             "DT_UNKNOWN" | "DT_FIFO" | "DT_CHR" | "DT_DIR" | "DT_BLK" | "DT_REG" | "DT_LNK"
             | "DT_SOCK" => true,
             "USRQUOTA" | "GRPQUOTA" => true,
@@ -4993,9 +5394,9 @@ fn test_haiku(target: &str) {
         }
     });
 
-    cfg.skip_field(move |struct_, field| {
-        match (struct_, field) {
-            // FIXME: the stat struct actually has timespec members, whereas
+    cfg.skip_struct_field(move |struct_, field| {
+        match (struct_.ident(), field.ident()) {
+            // FIXME(time): the stat struct actually has timespec members, whereas
             //        the current representation has these unpacked.
             ("stat", "st_atime") => true,
             ("stat", "st_atime_nsec") => true,
@@ -5025,12 +5426,19 @@ fn test_haiku(target: &str) {
     });
 
     cfg.skip_roundtrip(move |s| match s {
-        // FIXME: for some reason the roundtrip check fails for cpu_info
+        // FIXME(1.0): for some reason the roundtrip check fails for cpu_info
         "cpu_info" => true,
         _ => false,
     });
 
-    cfg.type_name(move |ty, is_struct, is_union| {
+    let c_enums = [
+        "directory_which",
+        "path_base_directory",
+        "cpu_platform",
+        "cpu_vendor",
+    ];
+    cfg.alias_is_c_enum(move |e| c_enums.contains(&e));
+    cfg.rename_struct_ty(move |ty| {
         match ty {
             // Just pass all these through, no need for a "struct" prefix
             "area_info"
@@ -5054,34 +5462,339 @@ fn test_haiku(target: &str) {
             | "cpu_topology_node_info"
             | "cpu_topology_root_info"
             | "cpu_topology_package_info"
-            | "cpu_topology_core_info" => ty.to_string(),
-
-            // enums don't need a prefix
-            "directory_which" | "path_base_directory" | "cpu_platform" | "cpu_vendor" => {
-                ty.to_string()
-            }
+            | "cpu_topology_core_info" => Some(ty.to_string()),
 
             // is actually a union
-            "sigval" => format!("union sigval"),
-            t if is_union => format!("union {}", t),
-            t if t.ends_with("_t") => t.to_string(),
-            t if is_struct => format!("struct {}", t),
-            t => t.to_string(),
+            "sigval" => Some("union sigval".to_string()),
+            t if t.ends_with("_t") => Some(t.to_string()),
+            _ => None,
         }
     });
 
-    cfg.field_name(move |struct_, field| {
-        match field {
+    cfg.rename_struct_field(move |struct_, field| {
+        let struct_ = struct_.ident();
+        match field.ident() {
             // Field is named `type` in C but that is a Rust keyword,
             // so these fields are translated to `type_` in the bindings.
-            "type_" if struct_ == "object_wait_info" => "type".to_string(),
-            "type_" if struct_ == "sem_t" => "type".to_string(),
-            "type_" if struct_ == "attr_info" => "type".to_string(),
-            "type_" if struct_ == "index_info" => "type".to_string(),
-            "type_" if struct_ == "cpu_topology_node_info" => "type".to_string(),
-            "image_type" if struct_ == "image_info" => "type".to_string(),
-            s => s.to_string(),
+            "type_" if struct_ == "object_wait_info" => Some("type".to_string()),
+            "type_" if struct_ == "sem_t" => Some("type".to_string()),
+            "type_" if struct_ == "attr_info" => Some("type".to_string()),
+            "type_" if struct_ == "index_info" => Some("type".to_string()),
+            "type_" if struct_ == "cpu_topology_node_info" => Some("type".to_string()),
+            "image_type" if struct_ == "image_info" => Some("type".to_string()),
+            _ => None,
         }
     });
-    cfg.generate("../src/lib.rs", "main.rs");
+
+    ctest::generate_test(&mut cfg, "../src/lib.rs", "ctest_output.rs").unwrap();
+}
+
+fn test_aix(target: &str) {
+    assert!(target.contains("aix"));
+
+    // ctest generates arguments supported only by clang, so make sure to
+    // run with CC=clang. While debugging, "CFLAGS=-ferror-limit=<large num>"
+    // is useful to get more error output.
+    let mut cfg = ctest_cfg();
+    cfg.define("_THREAD_SAFE", None);
+
+    // Avoid the error for definitions such as '{0, 0, 0, 1}' for
+    // 'IN6ADDR_LOOPBACK_INIT' in netinent/in.h.
+    cfg.flag("-Wno-missing-braces");
+
+    headers!(
+        cfg,
+        "aio.h",
+        "ctype.h",
+        "dirent.h",
+        "dlfcn.h",
+        "errno.h",
+        "fcntl.h",
+        "fnmatch.h",
+        "glob.h",
+        "grp.h",
+        "iconv.h",
+        "langinfo.h",
+        "libgen.h",
+        "limits.h",
+        "locale.h",
+        "malloc.h",
+        "mntent.h",
+        "mqueue.h",
+        "netinet/in.h",  // this needs be before net/if.h
+        "poll.h",        // this needs be before net/if.h
+        "sys/pollset.h", // this needs to be before net/if.h
+        "net/if.h",
+        "net/bpf.h", // this needs to be after net/if.h
+        "net/if_dl.h",
+        "netdb.h",
+        "netinet/tcp.h",
+        "netinet/sctp.h",
+        "pthread.h",
+        "pwd.h",
+        "rpcsvc/mount.h",
+        "rpcsvc/rstat.h",
+        "regex.h",
+        "resolv.h",
+        "sched.h",
+        "search.h",
+        "semaphore.h",
+        "signal.h",
+        "spawn.h",
+        "stddef.h",
+        "stdint.h",
+        "stdio.h",
+        "stdlib.h",
+        "string.h",
+        "strings.h",
+        "sys/aacct.h",
+        "sys/acct.h",
+        "sys/dr.h",
+        "sys/file.h",
+        "sys/io.h",
+        "sys/ioctl.h",
+        "sys/ipc.h",
+        "sys/ldr.h",
+        "sys/mman.h",
+        "sys/msg.h",
+        "sys/reg.h",
+        "sys/resource.h",
+        "sys/sem.h",
+        "sys/shm.h",
+        "sys/socket.h",
+        "sys/stat.h",
+        "sys/statfs.h",
+        "sys/statvfs.h",
+        "sys/stropts.h",
+        "sys/termio.h",
+        "sys/time.h",
+        "sys/times.h",
+        "sys/types.h",
+        "sys/uio.h",
+        "sys/un.h",
+        "sys/user.h",
+        "sys/utsname.h",
+        "sys/vattr.h",
+        "sys/vminfo.h",
+        "sys/wait.h",
+        "sys/xti.h",
+        "syslog.h",
+        "termios.h",
+        "thread.h",
+        "time.h",
+        "ucontext.h",
+        "unistd.h",
+        "utime.h",
+        "utmp.h",
+        "utmpx.h",
+        "wchar.h",
+    );
+
+    cfg.skip_alias(move |ty| match ty.ident() {
+        // AIX does not define type 'sighandler_t'.
+        "sighandler_t" => true,
+
+        // The alignment of 'double' does not agree between C and Rust for AIX.
+        // We are working on a resolution.
+        "c_double" => true,
+
+        _ => false,
+    });
+
+    cfg.rename_struct_ty(move |ty| match ty {
+        "DIR" | "FILE" | "ACTION" => Some(ty.to_string()),
+
+        // 'sigval' is a struct in Rust, but a union in C.
+        "sigval" => Some(format!("union sigval")),
+
+        t if t.ends_with("_t") => Some(t.to_string()),
+
+        _ => None,
+    });
+
+    cfg.skip_const(move |constant| match constant.ident() {
+        // Skip 'sighandler_t' assignments.
+        "SIG_DFL" | "SIG_ERR" | "SIG_IGN" => true,
+
+        // _ALL_SOURCE defines ENOTEMPTY as an alias of EEXIST, but POSIX
+        // requires its value to be unique. Skip.
+        "ENOTEMPTY" => true,
+
+        // FIXME(ctest): These constants are intended for use as the 'int request' argument
+        // to 'ioctl()'. However, the AIX headers do not explicitly define their types. If a
+        // value has the sign bit set, it gets sign-extended to a 64-bit value in the 64-bit
+        // mode, which fails the comparison with the Rust definitions, where the type is
+        //`c_int`.
+        "BIOCSETF" | "BIOCSBLEN" | "BIOCSRTIMEOUT" | "BIOCIMMEDIATE" | "BIOCSETIF" | "FIONBIO"
+        | "FIOASYNC" | "FIOSETOWN" | "TIOCSETD" | "TIOCMODS" | "TIOCSETP" | "TIOCSETN"
+        | "TIOCFLUSH" | "TIOCSETC" | "SIOCADDMULTI" | "SIOCADDRT" | "SIOCDARP" | "SIOCDELMULTI"
+        | "SIOCGIFADDR" | "SIOCGIFBRDADDR" | "SIOCGIFCONF" | "SIOCGIFDSTADDR" | "SIOCGIFFLAGS"
+        | "SIOCGIFHWADDR" | "SIOCGIFMETRIC" | "SIOCGIFMTU" | "SIOCGIFNETMASK" | "SIOCSARP"
+        | "SIOCSIFADDR" | "SIOCSIFBRDADDR" | "SIOCSIFDSTADDR" | "SIOCSIFFLAGS"
+        | "SIOCSIFMETRIC" | "SIOCSIFMTU" | "SIOCSIFNETMASK" | "TIOCUCNTL" | "TIOCCONS"
+        | "TIOCPKT" | "TIOCSWINSZ" | "TIOCLBIS" | "TIOCLBIC" | "TIOCLSET" | "TIOCSLTC"
+        | "TIOCSPGRP" | "TIOCSTI" | "TIOCMSET" | "TIOCMBIS" | "TIOCMBIC" | "TIOCREMOTE" => true,
+
+        _ => false,
+    });
+
+    cfg.skip_struct(move |struct_| {
+        match struct_.ident() {
+            // FIXME(union): actually a union.
+            "sigval" => true,
+
+            // 'struct fpreg_t' is not defined in AIX headers. It is created to
+            // allow type 'double' to be used in signal contexts.
+            "fpreg_t" => true,
+
+            // These structures are guarded by the `_KERNEL` macro in the AIX
+            // header.
+            "fileops_t" | "file" => true,
+
+            _ => false,
+        }
+    });
+
+    cfg.skip_union(|union_| {
+        match union_.ident() {
+            // '__poll_ctl_ext_u' and '__pollfd_ext_u' are for unnamed unions.
+            "__poll_ctl_ext_u" => true,
+            "__pollfd_ext_u" => true,
+
+            // This type is defined for a union used within `struct ld_info`.
+            // The AIX header does not declare a separate standalone union
+            // type for it.
+            "__ld_info_file" => true,
+
+            // This is a simplified version of the AIX union `_simple_lock`.
+            "_kernel_simple_lock" => true,
+
+            _ => false,
+        }
+    });
+
+    cfg.skip_struct_field_type(move |struct_, field| {
+        match (struct_.ident(), field.ident()) {
+            // AIX does not define 'sighandler_t'.
+            ("sigaction", "sa_sigaction") => true,
+
+            // The type of 'fpr' is 'fpreg_t' which is created to allow type
+            // 'double' to be used in signal contexts.
+            ("__context64", "fpr") => true,
+            ("__tm_context_t", "fpr") => true,
+
+            // The _ALL_SOURCE type of 'f_fsid' differs from POSIX's on AIX.
+            ("statvfs", "f_fsid") => true,
+
+            // The type of `_file` is `__ld_info_file`, which is defined
+            // specifically for the union inside `struct ld_info`. The AIX
+            // header does not define a separate standalone union type for it.
+            ("ld_info", "_file") => true,
+
+            _ => false,
+        }
+    });
+
+    cfg.skip_struct_field(move |s, field| {
+        match s.ident() {
+            // The field 'u' is actually a unnamed union in the AIX header.
+            "poll_ctl_ext" if field.ident() == "u" => true,
+
+            // The field 'data' is actually a unnamed union in the AIX header.
+            "pollfd_ext" if field.ident() == "data" => true,
+
+            _ => false,
+        }
+    });
+
+    cfg.skip_fn(move |func| {
+        match func.ident() {
+            // 'sighandler_t' is not defined on AIX.
+            "signal" => true,
+
+            // The function is only available under macro _USE_IRS in 'netdb.h'.
+            "hstrerror" => true,
+
+            // _ALL_SOURCE signatures for these functions differ from POSIX's
+            // on AIX.
+            "poll" => true,
+            "readlinkat" => true,
+            "readlink" => true,
+            "pselect" => true,
+
+            // The AIX signature differs from POSIX's, issue opened.
+            "gai_strerror" => true,
+
+            // AIX implements POSIX-compliant versions of these functions
+            // using 'static' wrappers in the headers, which in turn call
+            // the corresponding system libc functions prefixed with '_posix_'
+            // (e.g., '_posix_aio_read' for 'aio_read').
+            // On the Rust side, these functions resolve directly to the
+            // POSIX-compliant versions in the system libc. As a result,
+            // function pointer comparisons between the C and Rust sides
+            // would fail.
+            "getpwuid_r" | "getpwnam_r" | "getgrgid_r" | "getgrnam_r" | "aio_cancel"
+            | "aio_error" | "aio_fsync" | "aio_read" | "aio_return" | "aio_suspend"
+            | "aio_write" | "select" => true,
+
+            // 'getdtablesize' is a constant in the AIX header but it is
+            // a real function in libc which the Rust side is resolved to.
+            // The function pointer comparison test would fail.
+            "getdtablesize" => true,
+
+            // FIXME(ctest): Our API is unsound. The Rust API allows aliasing
+            // pointers, but the C API requires pointers not to alias.
+            // We should probably be at least using '&'/'&mut' here, see:
+            // https://github.com/gnzlbg/ctest/issues/68.
+            "lio_listio" => true,
+
+            // The function is only available under macro _KERNEL in 'proto_uipc.h'.
+            "getpeereid" => true,
+
+            // The AIX signatures for these non-POSIX functions differ from
+            // those on platforms like Linux: some arguments are not marked
+            // with the 'const' qualifier, even though they are not modified.
+            // To be consistent with other platforms, 'const' is added to the
+            // Rust declarations. However, this causes a mismatch with the AIX
+            // header signatures. Skipping.
+            "setdomainname" | "settimeofday" | "statfs" | "statfs64" | "statx" | "swapoff"
+            | "swapon" | "utmpname" | "setgroups" => true,
+
+            // These non-POSIX functions are guarded by the _KERNEL macro in the AIX headers.
+            "recvmmsg" | "sendmmsg" | "sethostid" | "sethostname" | "splice" => true,
+
+            // 'mount' is available in the system's libc.a and has a man page, but it is
+            // not declared in the AIX headers."
+            "mount" => true,
+
+            _ => false,
+        }
+    });
+
+    cfg.volatile_struct_field(|s, f| match (s.ident(), f.ident()) {
+        // 'aio_buf' is of type 'volatile void**' but since we cannot
+        // express that in Rust types, we have to explicitly tell the
+        // checker about it here.
+        ("aiocb", "aio_buf") => true,
+        _ => false,
+    });
+
+    let c_enums = ["uio_rw"];
+    cfg.alias_is_c_enum(move |e| c_enums.contains(&e));
+
+    ctest::generate_test(&mut cfg, "../src/lib.rs", "ctest_output.rs").unwrap();
+}
+
+/// Attempt to execute a command and collect its output, If the command fails for whatever
+/// reason, return `None`.
+fn try_command_output(cmd: &str, args: &[&str]) -> Option<String> {
+    let output = std::process::Command::new(cmd).args(args).output().ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let res = String::from_utf8(output.stdout)
+        .unwrap_or_else(|e| panic!("command {cmd} returned non-UTF-8 output: {e}"));
+    Some(res)
 }

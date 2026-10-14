@@ -1,11 +1,14 @@
 use std::env;
-use std::path::{Path, PathBuf};
+use std::path::{
+    Path,
+    PathBuf,
+};
 use std::process::Command;
 
 fn main() {
     let args = env::args_os()
         .skip(1)
-        .filter(|arg| arg != "--quiet")
+        .filter(|arg| arg != "--quiet" && arg != "--skip" && arg != "check_style")
         .collect::<Vec<_>>();
     assert_eq!(args.len(), 1);
     let test = PathBuf::from(&args[0]);
@@ -37,8 +40,8 @@ fn main() {
     let stderr = String::from_utf8_lossy(&output.stderr);
 
     println!(
-        "status: {}\nstdout ---\n{}\nstderr ---\n{}",
-        output.status, stdout, stderr
+        "status: {}\nstdout ---\n{stdout}\nstderr ---\n{stderr}",
+        output.status,
     );
 
     if !stderr.lines().any(|l| {
